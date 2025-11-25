@@ -1,4 +1,4 @@
-# title: 'create_differential_abundance_table.R'
+# title: 'create_diff_abundance_table.R'
 # project: 'Astrocyte Proteomic Responses to Ketamine in Mice'
 # author: 'Reina Hastings'
 # contact: 'reinahastings13@gmail.com'
@@ -12,24 +12,29 @@
 #     - Abundance Ratio (ketamine/control)
 #     - Adjusted p-value (FDR q-value)
 #     - Presence/absence patterns (file membership)
+#
+# required packages:
+#   - tidyverse
+#
 # inputs:
 #   - CSV with proteins detected in both groups
 #   - CSV with proteins detected only in control
 #   - CSV with proteins detected only in ketamine
+#
 # outputs:
-#   - <outdir>/differential_abundance_table.tsv
+#   - <outdir>/diff_abundance_table.tsv
 #   - <outdir>/significant_proteins.tsv
 #   - <outdir>/class_counts.tsv
 #   - <logfile> (script progress and summary)
-# required packages:
-#   - tidyverse (readr, dplyr, tibble, stringr, purrr)
+#
 # usage:
-#   Rscript create_differential_abundance_table.R \
-#     -b ../data/proteins_both.csv \
+#   Rscript create_diff_abundance_table.R \
+#     -b ../data/proteins_control_ketamine.csv \
 #     -c ../data/proteins_control.csv \
 #     -k ../data/proteins_ketamine.csv \
 #     -o ../results/diff_abundance \
 #     -l ../logs/create_diff_abundance_table.log
+# (single line version): Rscript create_diff_abundance_table.R -b ../data/proteins_control_ketamine.csv -c ../data/proteins_control.csv -k ../data/proteins_ketamine.csv -o ../results/diff_abundance -l ../logs/create_diff_abundance_table.log
 
 suppressPackageStartupMessages({
   library(tidyverse)
@@ -96,6 +101,11 @@ read_csv_logged <- function(path) {
   df <- readr::read_csv(path, show_col_types = FALSE)
   log_msg("  -> Read ", nrow(df), " rows and ", ncol(df), " columns.")
   df
+}
+
+# force all columns to character before binding rows
+harmonize_types <- function(df) {
+  df %>% mutate(across(everything(), as.character))
 }
 
 # --------------------------- main script --------------------------- #
@@ -173,7 +183,10 @@ main <- function() {
   log_msg("  control_only  : ", nrow(control_df_std))
   log_msg("  ketamine_only : ", nrow(ketamine_df_std))
 
-  # 3) compute log2FC ---------------------------------------------------- #
+  log_msg("DEBUG: First few p-values BEFORE numeric coercion:")
+  print(head(both_df_std$AbundanceRatioAdjP, 20))
+
+  # 3) compute log2FC for both_groups ------------------------------------- #
   log_msg("Computing log2 fold-change for proteins detected in both groups...")
 
   both_df_std <- both_df_std %>%
@@ -185,10 +198,8 @@ main <- function() {
       )
     )
 
-  # convert all columns to characters where necessary to avoid type conflicts
-  harmonize_types <- function(df) {
-    df %>% mutate(across(everything(), as.character))
-  }
+  # 4) combine all into one master table (no type coercion) -------------- #
+  log_msg("Combining all three tables into a master differential abundance table...")
 
   master_df <- bind_rows(
     harmonize_types(both_df_std),
@@ -196,16 +207,25 @@ main <- function() {
     harmonize_types(ketamine_df_std)
   )
 
-  log_msg("Total rows in master_df: ", nrow(master_df))
+  # coerce to numeric only for this diagnostic log
+  pvals_numeric <- suppressWarnings(as.numeric(master_df$AbundanceRatioAdjP))
 
-  # 4) classification ---------------------------------------------------- #
+  log_msg(
+    "P-value range right after bind_rows: min = ",
+    signif(min(pvals_numeric, na.rm = TRUE), 3),
+    ", max = ",
+    signif(max(pvals_numeric, na.rm = TRUE), 3)
+  )
+  # *** END PATCHED BLOCK *** #
+
+  # 5) classification ---------------------------------------------------- #
   log_msg("Applying classification rules...")
 
   master_df <- master_df %>%
     mutate(
-      AbundanceRatio = as.numeric(AbundanceRatio),
+      AbundanceRatio     = as.numeric(AbundanceRatio),
       AbundanceRatioAdjP = as.numeric(AbundanceRatioAdjP),
-      log2FC = as.numeric(log2FC),
+      log2FC             = as.numeric(log2FC),
 
       is_significant = !is.na(AbundanceRatioAdjP) &
                        AbundanceRatioAdjP <= q_threshold,
@@ -244,7 +264,7 @@ main <- function() {
 
   log_msg("Total significant/biologically flagged proteins: ", nrow(sig_df))
 
-  # 5) write outputs ---------------------------------------------------- #
+  # 6) write outputs ---------------------------------------------------- #
   out_table_path  <- file.path(args$outdir, "diff_abundance_table.tsv")
   out_sig_path    <- file.path(args$outdir, "significant_proteins.tsv")
   out_counts_path <- file.path(args$outdir, "class_counts.tsv")
