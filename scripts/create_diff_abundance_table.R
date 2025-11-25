@@ -262,7 +262,7 @@ main <- function() {
   log_msg("------------------------------------------------------------")
 }
 
-# run main() only when script is executed directly*, not when sourced
+# run main() only when script is executed directly, not when sourced
 if (identical(environment(), globalenv()) && !length(sys.calls())) {
   main()
 }
