@@ -3,7 +3,7 @@
 # author: Reina Hastings
 # contact: reinahastings13@gmail.com
 # date created: 2025-12-09
-# last modified: 2025-12-09
+# last modified: 2026-01-05
 #
 # purpose:
 #   Perform pathway enrichment analysis on differential abundance results using
@@ -11,8 +11,15 @@
 #   databases via gProfiler. Analyzes upregulated and downregulated protein sets
 #   separately, including presence/absence proteins.
 #
+#   Also supports REVIGO filtering mode to reduce GO term redundancy.
+#
 # inputs:
-#   - all_proteins_categorized.csv: Master file from diff_abundance_analysis.py
+#   Normal mode:
+#     - all_proteins_categorized.csv: Master file from diff_abundance_analysis.py
+#   
+#   REVIGO mode:
+#     - REVIGO output table (TSV from http://revigo.irb.hr/)
+#     - Original pathway_analysis results directory
 #
 # outputs:
 #   results/pathway_analysis/
@@ -24,16 +31,24 @@
 #   │   ├── upregulated_GO_BP_table.pdf/html
 #   │   ├── upregulated_GO_BP_network.pdf/html
 #   │   ├── upregulated_GO_BP_clustered.pdf/html
+#   │   ├── upregulated_GO_BP_publication_figure.pdf/html
 #   │   ├── upregulated_KEGG_plot.pdf/html
 #   │   ├── upregulated_KEGG_dotplot.pdf/html
 #   │   ├── upregulated_KEGG_table.pdf/html
 #   │   ├── upregulated_KEGG_network.pdf/html
+#   │   ├── upregulated_KEGG_publication_figure.pdf/html
 #   │   └── upregulated_summary.txt
 #   ├── downregulated/
 #   │   └── (similar structure, if significant terms found)
+#   ├── revigo/  (if REVIGO mode used)
+#   │   ├── upregulated/
+#   │   │   ├── upregulated_GO_BP_revigo.csv
+#   │   │   └── (all visualizations with _revigo suffix)
+#   │   └── revigo_filtering_summary.txt
 #   └── pathway_analysis_report.txt
 #
 # usage:
+#   # Normal mode - run full pathway analysis
 #   python pathway_analysis.py \
 #       --input ../results/combined/all_proteins_categorized.csv \
 #       --output_dir ../results/pathway_analysis \
@@ -41,14 +56,28 @@
 #       --pval_threshold 0.05 \
 #       --fdr_threshold 0.05
 #
+#   copy/paste: python pathway_analysis.py --input ../results/combined/all_proteins_categorized.csv --output_dir ../results/pathway_analysis --log_dir ../logs --pval_threshold 0.05 --fdr_threshold 0.05
+#
+#   # REVIGO mode - filter GO terms using REVIGO output
+#   python pathway_analysis.py \
+#       --revigo ../results/pathway_analysis/revigo/Revigo_BP_Table.tsv \
+#       --original_results ../results/pathway_analysis \
+#       --output_dir ../results/pathway_analysis \
+#       --log_dir ../logs \
+#       --input ../results/combined/all_proteins_categorized.csv
+#
+#   copy/paste: python pathway_analysis.py --revigo ../results/pathway_analysis/revigo/Revigo_BP_Table.tsv --original_results ../results/pathway_analysis --output_dir ../results/pathway_analysis --log_dir ../logs --input ../results/combined/all_proteins_categorized.csv
+#
 # dependencies:
 #   pip install gprofiler-official pandas numpy plotly kaleido networkx scipy
 #
 # notes:
-#   - Requires internet connection to query gProfiler API
+#   - Normal mode requires internet connection to query gProfiler API
 #   - Background set: all 903 detected proteins
 #   - Upregulated set: significant up (p ≤ 0.05) + ketamine-specific
 #   - Downregulated set: significant down (p ≤ 0.05) + control-specific
+#   - REVIGO (Supek et al., 2011) reduces GO term redundancy by clustering
+#     semantically similar terms
 
 import pandas as pd
 import numpy as np
@@ -331,7 +360,7 @@ def run_pathway_analysis(gene_list, background, set_name, output_dir, log_path, 
 # VISUALIZATION FUNCTIONS
 # =============================================================================
 
-def create_enrichment_bar_plot(df, source, set_name, output_dir, log_path, n_terms=15):
+def create_enrichment_bar_plot(df, source, set_name, output_dir, log_path, n_terms=15, filename_suffix=''):
     '''
     Create horizontal bar plot of top enriched terms.
     
@@ -342,6 +371,7 @@ def create_enrichment_bar_plot(df, source, set_name, output_dir, log_path, n_ter
         output_dir (str): Output directory
         log_path (str): Path to log file
         n_terms (int): Number of top terms to display
+        filename_suffix (str): Optional suffix for output filenames (e.g., '_revigo')
     '''
     if len(df) == 0:
         log_message(log_path, f'    Skipping plot for {source} (no significant terms)')
@@ -375,11 +405,12 @@ def create_enrichment_bar_plot(df, source, set_name, output_dir, log_path, n_ter
     # Format source name for title
     source_display = 'GO Biological Process' if source == 'GO:BP' else 'KEGG Pathways'
     direction_display = 'Upregulated' if set_name == 'upregulated' else 'Downregulated'
+    revigo_label = ' (REVIGO filtered)' if filename_suffix else ''
     
     # Layout
     fig.update_layout(
         title=dict(
-            text=f'{source_display}: {direction_display} Proteins',
+            text=f'{source_display}: {direction_display} Proteins{revigo_label}',
             font=dict(size=16, family='Arial Black')
         ),
         xaxis=dict(
@@ -400,8 +431,8 @@ def create_enrichment_bar_plot(df, source, set_name, output_dir, log_path, n_ter
     source_name = source.replace(':', '_')
     set_output_dir = os.path.join(output_dir, set_name)
     
-    pdf_path = os.path.join(set_output_dir, f'{set_name}_{source_name}_plot.pdf')
-    html_path = os.path.join(set_output_dir, f'{set_name}_{source_name}_plot.html')
+    pdf_path = os.path.join(set_output_dir, f'{set_name}_{source_name}_plot{filename_suffix}.pdf')
+    html_path = os.path.join(set_output_dir, f'{set_name}_{source_name}_plot{filename_suffix}.html')
     
     fig.write_image(pdf_path, scale=2)
     fig.write_html(html_path)
@@ -410,7 +441,7 @@ def create_enrichment_bar_plot(df, source, set_name, output_dir, log_path, n_ter
     log_message(log_path, f'    Saved: {html_path}')
 
 
-def create_dot_plot(df, source, set_name, output_dir, log_path, n_terms=15):
+def create_dot_plot(df, source, set_name, output_dir, log_path, n_terms=15, filename_suffix=''):
     '''
     Create dot plot showing gene ratio, gene count, and p-value.
     
@@ -421,6 +452,7 @@ def create_dot_plot(df, source, set_name, output_dir, log_path, n_terms=15):
         output_dir (str): Output directory
         log_path (str): Path to log file
         n_terms (int): Number of top terms to display
+        filename_suffix (str): Optional suffix for output filenames (e.g., '_revigo')
     '''
     if len(df) == 0 or 'gene_ratio' not in df.columns:
         return
@@ -456,11 +488,12 @@ def create_dot_plot(df, source, set_name, output_dir, log_path, n_terms=15):
     # Format source name for title
     source_display = 'GO Biological Process' if source == 'GO:BP' else 'KEGG Pathways'
     direction_display = 'Upregulated' if set_name == 'upregulated' else 'Downregulated'
+    revigo_label = ' (REVIGO filtered)' if filename_suffix else ''
     
     # Layout
     fig.update_layout(
         title=dict(
-            text=f'{source_display}: {direction_display} Proteins (Dot Plot)',
+            text=f'{source_display}: {direction_display} Proteins (Dot Plot){revigo_label}',
             font=dict(size=16, family='Arial Black')
         ),
         xaxis=dict(
@@ -481,8 +514,8 @@ def create_dot_plot(df, source, set_name, output_dir, log_path, n_terms=15):
     source_name = source.replace(':', '_')
     set_output_dir = os.path.join(output_dir, set_name)
     
-    pdf_path = os.path.join(set_output_dir, f'{set_name}_{source_name}_dotplot.pdf')
-    html_path = os.path.join(set_output_dir, f'{set_name}_{source_name}_dotplot.html')
+    pdf_path = os.path.join(set_output_dir, f'{set_name}_{source_name}_dotplot{filename_suffix}.pdf')
+    html_path = os.path.join(set_output_dir, f'{set_name}_{source_name}_dotplot{filename_suffix}.html')
     
     fig.write_image(pdf_path, scale=2)
     fig.write_html(html_path)
@@ -491,7 +524,7 @@ def create_dot_plot(df, source, set_name, output_dir, log_path, n_terms=15):
     log_message(log_path, f'    Saved: {html_path}')
 
 
-def create_results_table(df, source, set_name, output_dir, log_path):
+def create_results_table(df, source, set_name, output_dir, log_path, filename_suffix=''):
     '''
     Create formatted HTML and PDF tables of enrichment results.
     
@@ -501,6 +534,7 @@ def create_results_table(df, source, set_name, output_dir, log_path):
         set_name (str): 'upregulated' or 'downregulated'
         output_dir (str): Output directory
         log_path (str): Path to log file
+        filename_suffix (str): Optional suffix for output filenames (e.g., '_revigo')
     '''
     if len(df) == 0:
         return
@@ -619,7 +653,7 @@ def create_results_table(df, source, set_name, output_dir, log_path):
     # Save HTML
     source_name = source.replace(':', '_')
     set_output_dir = os.path.join(output_dir, set_name)
-    html_path = os.path.join(set_output_dir, f'{set_name}_{source_name}_table.html')
+    html_path = os.path.join(set_output_dir, f'{set_name}_{source_name}_table{filename_suffix}.html')
     
     with open(html_path, 'w') as f:
         f.write(html_content)
@@ -654,9 +688,10 @@ def create_results_table(df, source, set_name, output_dir, log_path):
         )
     )])
     
+    revigo_label = ' (REVIGO filtered)' if filename_suffix else ''
     fig.update_layout(
         title=dict(
-            text=f'{source_display}: {direction_display} Proteins<br><sup>Showing {len(table_df)} enriched terms</sup>',
+            text=f'{source_display}: {direction_display} Proteins{revigo_label}<br><sup>Showing {len(table_df)} enriched terms</sup>',
             font=dict(size=14, family='Arial Black')
         ),
         width=900,
@@ -664,13 +699,13 @@ def create_results_table(df, source, set_name, output_dir, log_path):
         margin=dict(t=80, b=20, l=20, r=20)
     )
     
-    pdf_path = os.path.join(set_output_dir, f'{set_name}_{source_name}_table.pdf')
+    pdf_path = os.path.join(set_output_dir, f'{set_name}_{source_name}_table{filename_suffix}.pdf')
     fig.write_image(pdf_path, scale=2)
     
     log_message(log_path, f'    Saved: {pdf_path}')
 
 
-def create_gene_term_network(df, source, set_name, output_dir, log_path, enrichment_results_full):
+def create_gene_term_network(df, source, set_name, output_dir, log_path, enrichment_results_full, filename_suffix=''):
     '''
     Create gene-term network visualization showing relationships between
     enriched terms and the genes that drive them.
@@ -682,6 +717,7 @@ def create_gene_term_network(df, source, set_name, output_dir, log_path, enrichm
         output_dir (str): Output directory
         log_path (str): Path to log file
         enrichment_results_full (pd.DataFrame): Full gProfiler results with intersections
+        filename_suffix (str): Optional suffix for output filenames (e.g., '_revigo')
     '''
     if len(df) == 0:
         return
@@ -852,8 +888,8 @@ def create_gene_term_network(df, source, set_name, output_dir, log_path, enrichm
     source_name = source.replace(':', '_')
     set_output_dir = os.path.join(output_dir, set_name)
     
-    pdf_path = os.path.join(set_output_dir, f'{set_name}_{source_name}_network.pdf')
-    html_path = os.path.join(set_output_dir, f'{set_name}_{source_name}_network.html')
+    pdf_path = os.path.join(set_output_dir, f'{set_name}_{source_name}_network{filename_suffix}.pdf')
+    html_path = os.path.join(set_output_dir, f'{set_name}_{source_name}_network{filename_suffix}.html')
     
     fig.write_image(pdf_path, scale=2)
     fig.write_html(html_path)
@@ -1060,13 +1096,53 @@ def create_term_clustering(df, source, set_name, output_dir, log_path, enrichmen
     log_message(log_path, f'    Saved: {cluster_csv_path}')
 
 
+def wrap_label(label, max_line_len=30):
+    '''
+    Wrap long labels to two lines for better readability.
+    Splits at a space near the middle of the label.
+    
+    Parameters:
+        label (str): The label text to wrap
+        max_line_len (int): Maximum characters per line before wrapping
+    
+    Returns:
+        str: Label with <br> tag inserted for line break if needed
+    '''
+    if len(label) <= max_line_len:
+        return label
+    
+    # Find a good split point (space nearest to middle)
+    mid = len(label) // 2
+    
+    # Search for space near middle, expanding outward
+    best_split = None
+    for offset in range(mid):
+        # Check position after middle
+        if mid + offset < len(label) and label[mid + offset] == ' ':
+            best_split = mid + offset
+            break
+        # Check position before middle
+        if mid - offset >= 0 and label[mid - offset] == ' ':
+            best_split = mid - offset
+            break
+    
+    # If no space found, just split at max_line_len
+    if best_split is None:
+        best_split = max_line_len
+    
+    # Insert HTML line break
+    return label[:best_split] + '<br>' + label[best_split:].strip()
+
+
 def create_publication_figure(df, source, set_name, output_dir, log_path, 
                                enrichment_results_full, protein_data, n_top_terms=6):
     '''
     Create publication-style figure inspired by Herzog et al. 2021 Figure 4.
     
-    Panel A: Top biological functions with hierarchical clustering and significance heatmap
-    Panels B-F: Gene-level heatmaps for each top pathway showing log2 fold changes
+    Uses an improved 3-row layout to prevent label overlap:
+    - Row 1: Panel A (main heatmap) spanning full width
+    - Row 2: Panels B, C, D (gene heatmaps)
+    - Row 3: Panels E, F (gene heatmaps)
     
     Parameters:
         df (pd.DataFrame): Enrichment results (filtered)
@@ -1124,84 +1200,97 @@ def create_publication_figure(df, source, set_name, output_dir, log_path,
         return
     
     # ---------------------------------------------------------------------
-    # Calculate similarity matrix for hierarchical clustering
+    # Order terms by significance (FDR p-value) - NO clustering
+    # This ensures Panel A and Panels B-F are in the same order
     # ---------------------------------------------------------------------
-    term_list = list(term_genes.keys())
-    n_terms = len(term_list)
+    # Terms from top_terms are already sorted by fdr_pvalue (most significant first)
+    ordered_term_ids = top_terms['term_id'].tolist()
+    ordered_term_names = top_terms['term_name'].tolist()
+    ordered_pvalues = top_terms['fdr_pvalue'].tolist()
     
-    similarity_matrix = np.zeros((n_terms, n_terms))
-    for i in range(n_terms):
-        for j in range(n_terms):
-            set_i = set(term_genes[term_list[i]])
-            set_j = set(term_genes[term_list[j]])
-            intersection = len(set_i & set_j)
-            union = len(set_i | set_j)
-            similarity_matrix[i, j] = intersection / union if union > 0 else 0
+    # Filter to only terms that have gene data available
+    filtered_ids = []
+    filtered_names = []
+    filtered_pvalues = []
     
-    # Perform hierarchical clustering
-    distance_matrix = 1 - similarity_matrix
-    np.fill_diagonal(distance_matrix, 0)
+    for tid, tname, pval in zip(ordered_term_ids, ordered_term_names, ordered_pvalues):
+        if tid in term_genes and len(term_genes[tid]) > 0:
+            filtered_ids.append(tid)
+            filtered_names.append(tname)
+            filtered_pvalues.append(pval)
     
-    condensed_dist = pdist(distance_matrix)
-    if len(condensed_dist) > 0:
-        linkage_matrix = linkage(condensed_dist, method='average')
-        from scipy.cluster.hierarchy import dendrogram
-        dendro = dendrogram(linkage_matrix, no_plot=True)
-        order = dendro['leaves']
-    else:
-        order = list(range(n_terms))
+    ordered_term_ids = filtered_ids
+    ordered_term_names = filtered_names
+    ordered_pvalues = filtered_pvalues
     
-    # Reorder terms based on clustering
-    ordered_term_ids = [term_list[i] for i in order]
-    ordered_term_names = []
-    ordered_pvalues = []
-    
-    for tid in ordered_term_ids:
-        row = top_terms[top_terms['term_id'] == tid]
-        if len(row) > 0:
-            ordered_term_names.append(row['term_name'].values[0])
-            ordered_pvalues.append(row['fdr_pvalue'].values[0])
+    log_message(log_path, f'      Terms ordered by significance:')
+    for i, (tname, pval) in enumerate(zip(ordered_term_names, ordered_pvalues)):
+        log_message(log_path, f'        {i+1}. {tname} (FDR={pval:.2e})')
     
     # ---------------------------------------------------------------------
-    # Create figure with subplots
-    # Panel A: Main heatmap with clustering
-    # Panels B onwards: Individual pathway gene heatmaps
+    # Create figure with improved 3-row layout
+    # Row 1: Panel A (main heatmap) - full width
+    # Row 2: Panels B, C, D (gene heatmaps)
+    # Row 3: Panels E, F (gene heatmaps)
     # ---------------------------------------------------------------------
     n_pathway_panels = min(5, len(ordered_term_ids))  # Max 5 pathway panels
     
-    # Calculate subplot layout
+    # Build subplot specs for 3-row layout
+    specs = [
+        [{'colspan': 3, 'type': 'heatmap'}, None, None],
+        [{'type': 'heatmap'}] * 3,
+        [{'type': 'heatmap'}] * 3
+    ]
+    
+    # Build subplot titles with wrapped names to prevent overlap
+    subplot_titles = ['A. Top Biological Functions (by significance)']
+    
+    # Row 2 panels: B, C, D
+    for i in range(min(3, n_pathway_panels)):
+        name = wrap_label(ordered_term_names[i], 25)
+        subplot_titles.append(f'{chr(66 + i)}. {name}')
+    # Pad row 2 if fewer than 3 panels
+    while len(subplot_titles) < 4:
+        subplot_titles.append('')
+    
+    # Row 3 panels: E, F
+    for i in range(3, n_pathway_panels):
+        name = wrap_label(ordered_term_names[i], 25)
+        subplot_titles.append(f'{chr(66 + i)}. {name}')
+    # Pad row 3
+    while len(subplot_titles) < 7:
+        subplot_titles.append('')
+    
     fig = make_subplots(
-        rows=2, cols=max(3, n_pathway_panels),
-        row_heights=[0.5, 0.5],
-        column_widths=[0.4] + [0.6 / max(2, n_pathway_panels - 1)] * (max(2, n_pathway_panels - 1)),
-        specs=[[{'colspan': max(3, n_pathway_panels), 'type': 'heatmap'}, None, None] + [None] * (max(0, n_pathway_panels - 3)),
-               [{'type': 'heatmap'}] * max(3, n_pathway_panels)],
-        subplot_titles=['A. Top Biological Functions'] + 
-                       [f'{chr(66 + i)}. {ordered_term_names[i][:30]}...' if len(ordered_term_names[i]) > 30 
-                        else f'{chr(66 + i)}. {ordered_term_names[i]}' 
-                        for i in range(n_pathway_panels)],
-        vertical_spacing=0.15,
-        horizontal_spacing=0.05
+        rows=3, cols=3,
+        row_heights=[0.32, 0.34, 0.34],
+        specs=specs,
+        subplot_titles=subplot_titles,
+        vertical_spacing=0.14,
+        horizontal_spacing=0.10
     )
     
     # ---------------------------------------------------------------------
     # Panel A: Top biological functions heatmap
+    # Reverse order so most significant appears at TOP (Plotly y-axis is bottom-to-top)
     # ---------------------------------------------------------------------
-    # Create heatmap data
-    heatmap_values = [[-np.log10(p)] for p in ordered_pvalues]
+    # Wrap term names for display (allows two lines)
+    display_term_names = [wrap_label(name, 35) for name in reversed(ordered_term_names)]
+    heatmap_values = [[-np.log10(p)] for p in reversed(ordered_pvalues)]
     
     fig.add_trace(
         go.Heatmap(
             z=heatmap_values,
-            y=ordered_term_names,
+            y=display_term_names,
             x=['Ketamine vs Control'],
             colorscale='Purples',
             showscale=True,
             colorbar=dict(
-                title='-log₁₀(FDR)',
-                x=0.35,
-                len=0.4,
-                y=0.75
+                title=dict(text='-log₁₀(FDR)', font=dict(size=11)),
+                x=1.02,        # Move to right side (same position as log2FC colorbar)
+                len=0.28,
+                y=0.85,        # Position in upper portion
+                thickness=15
             ),
             hovertemplate='<b>%{y}</b><br>-log₁₀(FDR): %{z:.2f}<extra></extra>'
         ),
@@ -1239,7 +1328,23 @@ def create_publication_figure(df, source, set_name, output_dir, log_path,
         if len(gene_values) == 0:
             continue
         
-        # Add heatmap for this pathway
+        # Sort by fold change: ascending order so HIGHEST appears at TOP of heatmap
+        # (Plotly heatmaps display y-axis from bottom to top)
+        sorted_data = sorted(zip(gene_names, gene_values), key=lambda x: x[1][0], reverse=False)
+        gene_names = [x[0] for x in sorted_data]
+        gene_values = [x[1] for x in sorted_data]
+        
+        # Determine row and column in 3-row layout
+        if panel_idx < 3:
+            plot_row = 2
+            plot_col = panel_idx + 1
+        else:
+            plot_row = 3
+            plot_col = panel_idx - 3 + 1
+        
+        # Only show colorbar on the last panel
+        show_colorbar = (panel_idx == n_pathway_panels - 1)
+        
         fig.add_trace(
             go.Heatmap(
                 z=gene_values,
@@ -1249,40 +1354,55 @@ def create_publication_figure(df, source, set_name, output_dir, log_path,
                 zmid=0,
                 zmin=-4,
                 zmax=4,
-                showscale=(panel_idx == n_pathway_panels - 1),  # Only show scale on last panel
+                showscale=show_colorbar,
                 colorbar=dict(
-                    title='log₂FC',
+                    title=dict(text='log₂FC', font=dict(size=11)),
                     x=1.02,
-                    len=0.4,
-                    y=0.25
-                ) if panel_idx == n_pathway_panels - 1 else None,
+                    len=0.28,
+                    y=0.17,
+                    thickness=15
+                ) if show_colorbar else None,
                 hovertemplate='<b>%{y}</b><br>log₂FC: %{z:.2f}<extra></extra>'
             ),
-            row=2, col=panel_idx + 1
+            row=plot_row, col=plot_col
         )
     
     # ---------------------------------------------------------------------
     # Update layout
     # ---------------------------------------------------------------------
     source_display = 'GO Biological Process' if source == 'GO:BP' else 'KEGG Pathways'
+    direction_label = 'Upregulated' if set_name == 'upregulated' else 'Downregulated'
     
     fig.update_layout(
         title=dict(
-            text=f'Pathway Enrichment Analysis: {source_display}<br>' +
-                 f'<sup>Upregulated proteins in Ketamine vs Control</sup>',
-            font=dict(size=16, family='Arial Black'),
+            text=f'<b>Pathway Enrichment Analysis: {source_display}</b><br>' +
+                 f'<span style="font-size:13px; color:#666">{direction_label} proteins in Ketamine vs Control</span>',
+            font=dict(size=18, family='Arial'),
             x=0.5
         ),
-        height=900,
-        width=1400,
+        height=1000,
+        width=1100,
         plot_bgcolor='white',
         paper_bgcolor='white',
-        font=dict(size=10)
+        font=dict(size=10, family='Arial'),
+        margin=dict(l=180, r=80, t=100, b=50)
     )
     
-    # Update y-axes for gene heatmaps
-    for i in range(n_pathway_panels):
-        fig.update_yaxes(tickfont=dict(size=9, color='#1F77B4'), row=2, col=i + 1)
+    # Update all axes fonts
+    fig.update_yaxes(tickfont=dict(size=10))
+    fig.update_xaxes(tickfont=dict(size=10))
+    
+    # Make gene names blue in gene panels (rows 2 and 3)
+    for row_idx in [2, 3]:
+        for col_idx in [1, 2, 3]:
+            fig.update_yaxes(
+                tickfont=dict(size=9, color='#1F77B4'),
+                row=row_idx, col=col_idx
+            )
+    
+    # Update subplot title fonts
+    for annotation in fig['layout']['annotations']:
+        annotation['font'] = dict(size=11, color='#333333')
     
     # ---------------------------------------------------------------------
     # Save outputs
@@ -1412,26 +1532,383 @@ def generate_final_report(gene_sets, all_results, output_dir, pval_threshold, fd
             f.write('\n')
         
         # ---------------------------------------------------------------------
-        # Top findings
+        # Top findings - GO:BP
         # ---------------------------------------------------------------------
         f.write('-' * 70 + '\n')
-        f.write('TOP FINDINGS\n')
+        f.write('TOP FINDINGS - GO BIOLOGICAL PROCESS\n')
         f.write('-' * 70 + '\n\n')
-        
+
         for set_name in ['upregulated', 'downregulated']:
-            f.write(f'{set_name.upper()} - Top 5 GO Biological Process terms:\n')
+            f.write(f'{set_name.upper()} - Top 10 GO:BP terms:\n')
             results = all_results.get(set_name, {})
             result_data = results.get('GO:BP', {'clean': pd.DataFrame()})
             df = result_data.get('clean', pd.DataFrame()) if isinstance(result_data, dict) else result_data
-            
+
             if len(df) > 0:
-                for i, (_, row) in enumerate(df.head(5).iterrows(), 1):
-                    f.write(f"  {i}. {row['term_name']} (FDR={row['fdr_pvalue']:.2e})\n")
+                for i, (_, row) in enumerate(df.head(10).iterrows(), 1):
+                    term_name = row['term_name']
+                    fdr = row['fdr_pvalue']
+                    gene_count = row.get('intersection_size', row.get('term_size', 'N/A'))
+                    f.write(f"  {i:2d}. {term_name}\n")
+                    f.write(f"      FDR = {fdr:.2e}, Genes = {gene_count}\n")
             else:
                 f.write('  No significant terms found.\n')
             f.write('\n')
-    
+
+        # ---------------------------------------------------------------------
+        # Top findings - KEGG
+        # ---------------------------------------------------------------------
+        f.write('-' * 70 + '\n')
+        f.write('TOP FINDINGS - KEGG PATHWAYS\n')
+        f.write('-' * 70 + '\n\n')
+
+        for set_name in ['upregulated', 'downregulated']:
+            f.write(f'{set_name.upper()} - All KEGG pathways:\n')
+            results = all_results.get(set_name, {})
+            result_data = results.get('KEGG', {'clean': pd.DataFrame()})
+            df = result_data.get('clean', pd.DataFrame()) if isinstance(result_data, dict) else result_data
+
+            if len(df) > 0:
+                for i, (_, row) in enumerate(df.iterrows(), 1):
+                    term_name = row['term_name']
+                    term_id = row.get('term_id', row.get('native', 'N/A'))
+                    fdr = row['fdr_pvalue']
+                    gene_count = row.get('intersection_size', row.get('term_size', 'N/A'))
+                    # Get genes if available
+                    genes = row.get('intersections', '')
+                    if isinstance(genes, str) and genes:
+                        gene_list = genes
+                    elif isinstance(genes, list):
+                        gene_list = ', '.join(genes)
+                    else:
+                        gene_list = ''
+
+                    f.write(f"  {i}. {term_name} ({term_id})\n")
+                    f.write(f"     FDR = {fdr:.2e}, Gene count = {gene_count}\n")
+                    if gene_list:
+                        f.write(f"     Genes: {gene_list}\n")
+            else:
+                f.write('  No significant pathways found.\n')
+            f.write('\n')
+
+        # ---------------------------------------------------------------------
+        # Detailed gene lists
+        # ---------------------------------------------------------------------
+        f.write('-' * 70 + '\n')
+        f.write('DETAILED GENE INFORMATION\n')
+        f.write('-' * 70 + '\n\n')
+
+        for set_name in ['upregulated', 'downregulated']:
+            gene_list = gene_sets.get(set_name, [])
+            f.write(f'{set_name.upper()} GENES ({len(gene_list)} total):\n')
+            if gene_list:
+                # Format genes in columns
+                genes_sorted = sorted(gene_list)
+                line = '  '
+                for i, gene in enumerate(genes_sorted):
+                    if i > 0 and i % 8 == 0:
+                        f.write(line.rstrip(', ') + '\n')
+                        line = '  '
+                    line += f'{gene}, '
+                if line.strip():
+                    f.write(line.rstrip(', ') + '\n')
+            else:
+                f.write('  None\n')
+            f.write('\n')
+
+        # ---------------------------------------------------------------------
+        # Biological interpretation notes
+        # ---------------------------------------------------------------------
+        f.write('-' * 70 + '\n')
+        f.write('INTERPRETATION NOTES\n')
+        f.write('-' * 70 + '\n\n')
+
+        # Check for synaptic/vesicular enrichment
+        results = all_results.get('upregulated', {})
+        gobp_data = results.get('GO:BP', {'clean': pd.DataFrame()})
+        gobp_df = gobp_data.get('clean', pd.DataFrame()) if isinstance(gobp_data, dict) else gobp_data
+        kegg_data = results.get('KEGG', {'clean': pd.DataFrame()})
+        kegg_df = kegg_data.get('clean', pd.DataFrame()) if isinstance(kegg_data, dict) else kegg_data
+
+        if len(gobp_df) > 0 or len(kegg_df) > 0:
+            f.write('Key biological themes identified:\n\n')
+
+            # Check for synaptic terms
+            synaptic_terms = []
+            if len(gobp_df) > 0:
+                synaptic_mask = gobp_df['term_name'].str.contains('synap|vesicle|exocyt', case=False, na=False)
+                synaptic_terms = gobp_df[synaptic_mask]['term_name'].head(5).tolist()
+
+            if synaptic_terms:
+                f.write('  1. SYNAPTIC/VESICULAR FUNCTION:\n')
+                f.write('     Strong enrichment for synaptic vesicle and exocytosis pathways.\n')
+                f.write('     This suggests ketamine treatment enhances vesicular release\n')
+                f.write('     machinery in astrocytes.\n\n')
+
+            # Check for metabolic terms
+            if len(kegg_df) > 0:
+                metabolic_mask = kegg_df['term_name'].str.contains('metabol|oxidative|phosphoryl', case=False, na=False)
+                if metabolic_mask.any():
+                    f.write('  2. METABOLIC CHANGES:\n')
+                    f.write('     Enrichment in metabolic pathways indicates potential changes\n')
+                    f.write('     in cellular energy production or utilization.\n\n')
+
+            # Note about spurious pathways
+            if len(kegg_df) > 0:
+                spurious = ['Rheumatoid arthritis', 'Collecting duct']
+                spurious_found = [t for t in kegg_df['term_name'].tolist()
+                                  if any(s in t for s in spurious)]
+                if spurious_found:
+                    f.write('  NOTE ON SPURIOUS PATHWAYS:\n')
+                    f.write(f'     The following may be false positives due to gene promiscuity:\n')
+                    for sp in spurious_found:
+                        f.write(f'     - {sp}\n')
+                    f.write('     These pathways share genes with synaptic/secretory processes\n')
+                    f.write('     but are not biologically relevant in astrocyte context.\n\n')
+        else:
+            f.write('No significant enrichment detected for interpretation.\n\n')
+
+        # ---------------------------------------------------------------------
+        # File locations
+        # ---------------------------------------------------------------------
+        f.write('-' * 70 + '\n')
+        f.write('OUTPUT FILE LOCATIONS\n')
+        f.write('-' * 70 + '\n\n')
+        f.write(f'Results directory: {output_dir}\n\n')
+        f.write('Upregulated results:\n')
+        f.write('  - upregulated/upregulated_GO_BP.csv\n')
+        f.write('  - upregulated/upregulated_KEGG.csv\n')
+        f.write('  - upregulated/upregulated_*_publication_figure.pdf\n\n')
+        f.write('Downregulated results:\n')
+        f.write('  - downregulated/downregulated_GO_BP.csv\n')
+        f.write('  - downregulated/downregulated_KEGG.csv\n\n')
+        f.write('Visualizations (PDF and interactive HTML):\n')
+        f.write('  - *_plot.pdf/html      : Bar plots\n')
+        f.write('  - *_dotplot.pdf/html   : Dot plots\n')
+        f.write('  - *_table.pdf/html     : Interactive tables\n')
+        f.write('  - *_network.pdf/html   : Gene-term networks\n')
+        f.write('  - *_clustered.pdf/html : Clustered heatmaps\n')
+
     log_message(log_path, f'Saved final report: {report_path}')
+
+
+# =============================================================================
+# REVIGO INTEGRATION FUNCTIONS
+# =============================================================================
+
+def parse_revigo_output(revigo_path, log_path):
+    '''
+    Parse REVIGO output table to get list of non-redundant GO term IDs.
+    
+    REVIGO output format:
+    - TermID: GO term ID (with quotes)
+    - Name: Term name
+    - Value: -log10(p-value) as negative number
+    - Representative: NaN for representative terms, GO ID (as number) for redundant terms
+    
+    Parameters:
+        revigo_path (str): Path to REVIGO TSV output file
+        log_path (str): Path to log file
+    
+    Returns:
+        set: Set of non-redundant GO term IDs to keep
+    '''
+    log_message(log_path, f'Parsing REVIGO output: {revigo_path}')
+    
+    df = pd.read_csv(revigo_path, sep='\t')
+    
+    # Clean up quotes in TermID column
+    df['TermID'] = df['TermID'].str.replace('"', '')
+    
+    # Representatives have NaN in the Representative column
+    representatives = df[df['Representative'].isna()]
+    redundant = df[df['Representative'].notna()]
+    
+    # Get set of non-redundant term IDs
+    keep_terms = set(representatives['TermID'].tolist())
+    
+    log_message(log_path, f'  Total terms in REVIGO output: {len(df)}')
+    log_message(log_path, f'  Non-redundant representatives: {len(representatives)}')
+    log_message(log_path, f'  Redundant terms removed: {len(redundant)}')
+    log_message(log_path, f'  Reduction: {len(df)} → {len(keep_terms)} ({100*len(redundant)/len(df):.1f}% removed)')
+    
+    return keep_terms
+
+
+def run_revigo_mode(args, log_path):
+    '''
+    Run pathway analysis in REVIGO filtering mode.
+    
+    This mode:
+    1. Reads existing pathway analysis results
+    2. Filters GO:BP terms to keep only REVIGO non-redundant representatives
+    3. Regenerates all visualizations with filtered terms
+    4. Saves results to a 'revigo' subdirectory
+    
+    Parameters:
+        args: Parsed command-line arguments
+        log_path (str): Path to log file
+    '''
+    log_message(log_path, '')
+    log_message(log_path, '=' * 50)
+    log_message(log_path, 'REVIGO FILTERING MODE')
+    log_message(log_path, '=' * 50)
+    
+    # -------------------------------------------------------------------------
+    # Validate inputs
+    # -------------------------------------------------------------------------
+    if not args.original_results:
+        raise ValueError('--original_results is required for REVIGO mode')
+    
+    if not os.path.exists(args.revigo):
+        raise FileNotFoundError(f'REVIGO file not found: {args.revigo}')
+    
+    if not os.path.exists(args.original_results):
+        raise FileNotFoundError(f'Original results directory not found: {args.original_results}')
+    
+    # -------------------------------------------------------------------------
+    # Parse REVIGO output to get non-redundant terms
+    # -------------------------------------------------------------------------
+    keep_terms = parse_revigo_output(args.revigo, log_path)
+    
+    # -------------------------------------------------------------------------
+    # Setup output directory
+    # -------------------------------------------------------------------------
+    revigo_output_dir = os.path.join(args.output_dir, 'revigo')
+    os.makedirs(revigo_output_dir, exist_ok=True)
+    log_message(log_path, f'  Output directory: {revigo_output_dir}')
+    
+    # -------------------------------------------------------------------------
+    # Process each gene set (upregulated/downregulated)
+    # -------------------------------------------------------------------------
+    for set_name in ['upregulated', 'downregulated']:
+        set_input_dir = os.path.join(args.original_results, set_name)
+        
+        if not os.path.exists(set_input_dir):
+            log_message(log_path, f'\n  Skipping {set_name} (directory not found)')
+            continue
+        
+        log_message(log_path, f'\n  Processing {set_name}...')
+        
+        # Create output subdirectory
+        set_output_dir = os.path.join(revigo_output_dir, set_name)
+        os.makedirs(set_output_dir, exist_ok=True)
+        
+        # ---------------------------------------------------------------------
+        # Load original GO:BP results
+        # ---------------------------------------------------------------------
+        go_bp_path = os.path.join(set_input_dir, f'{set_name}_GO_BP.csv')
+        
+        if not os.path.exists(go_bp_path):
+            log_message(log_path, f'    GO:BP results not found: {go_bp_path}')
+            continue
+        
+        df_original = pd.read_csv(go_bp_path)
+        log_message(log_path, f'    Loaded {len(df_original)} original GO:BP terms')
+        
+        # ---------------------------------------------------------------------
+        # Filter to keep only REVIGO non-redundant terms
+        # ---------------------------------------------------------------------
+        df_filtered = df_original[df_original['term_id'].isin(keep_terms)].copy()
+        log_message(log_path, f'    After REVIGO filtering: {len(df_filtered)} terms')
+        
+        if len(df_filtered) == 0:
+            log_message(log_path, f'    No terms remaining after filtering!')
+            continue
+        
+        # Save filtered results
+        filtered_csv_path = os.path.join(set_output_dir, f'{set_name}_GO_BP_revigo.csv')
+        df_filtered.to_csv(filtered_csv_path, index=False)
+        log_message(log_path, f'    Saved: {filtered_csv_path}')
+        
+        # ---------------------------------------------------------------------
+        # Load protein data for visualizations (needed for publication figure)
+        # ---------------------------------------------------------------------
+        protein_data = None
+        if args.input and os.path.exists(args.input):
+            protein_data = pd.read_csv(args.input)
+            log_message(log_path, f'    Loaded protein data: {len(protein_data)} proteins')
+        
+        # ---------------------------------------------------------------------
+        # Regenerate visualizations with filtered terms
+        # ---------------------------------------------------------------------
+        log_message(log_path, f'    Creating visualizations...')
+        
+        source = 'GO:BP'
+        
+        # Bar plot
+        create_enrichment_bar_plot(
+            df_filtered, source, set_name, revigo_output_dir, log_path,
+            filename_suffix='_revigo'
+        )
+        
+        # Dot plot
+        create_dot_plot(
+            df_filtered, source, set_name, revigo_output_dir, log_path,
+            filename_suffix='_revigo'
+        )
+        
+        # Results table
+        create_results_table(
+            df_filtered, source, set_name, revigo_output_dir, log_path,
+            filename_suffix='_revigo'
+        )
+        
+        # Gene-term network (need full results with intersections)
+        # Try to load from original if available
+        go_bp_full_path = os.path.join(set_input_dir, f'{set_name}_GO_BP_full.csv')
+        if os.path.exists(go_bp_full_path):
+            df_full = pd.read_csv(go_bp_full_path)
+            # Filter full results too
+            df_full_filtered = df_full[df_full['native'].isin(keep_terms)].copy()
+            
+            create_gene_term_network(
+                df_filtered, source, set_name, revigo_output_dir, log_path,
+                df_full_filtered, filename_suffix='_revigo'
+            )
+        
+        # Publication figure
+        if protein_data is not None and os.path.exists(go_bp_full_path):
+            create_publication_figure(
+                df_filtered, source, set_name, revigo_output_dir, log_path,
+                df_full_filtered, protein_data
+            )
+        
+        # ---------------------------------------------------------------------
+        # Also copy KEGG results (unchanged by REVIGO)
+        # ---------------------------------------------------------------------
+        kegg_path = os.path.join(set_input_dir, f'{set_name}_KEGG.csv')
+        if os.path.exists(kegg_path):
+            import shutil
+            kegg_dest = os.path.join(set_output_dir, f'{set_name}_KEGG.csv')
+            shutil.copy(kegg_path, kegg_dest)
+            log_message(log_path, f'    Copied KEGG results (unchanged by REVIGO)')
+    
+    # -------------------------------------------------------------------------
+    # Generate summary report
+    # -------------------------------------------------------------------------
+    summary_path = os.path.join(revigo_output_dir, 'revigo_filtering_summary.txt')
+    with open(summary_path, 'w') as f:
+        f.write('=' * 70 + '\n')
+        f.write('REVIGO FILTERING SUMMARY\n')
+        f.write('=' * 70 + '\n\n')
+        f.write(f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}\n')
+        f.write(f'REVIGO input: {args.revigo}\n')
+        f.write(f'Original results: {args.original_results}\n')
+        f.write(f'Output directory: {revigo_output_dir}\n\n')
+        f.write(f'Non-redundant terms retained: {len(keep_terms)}\n\n')
+        f.write('This analysis uses REVIGO (Supek et al., 2011) to reduce\n')
+        f.write('redundancy among GO terms by clustering semantically similar\n')
+        f.write('terms and retaining representative terms.\n\n')
+        f.write('Reference:\n')
+        f.write('Supek F, Bošnjak M, Škunca N, Šmuc T. REVIGO summarizes and\n')
+        f.write('visualizes long lists of Gene Ontology terms. PLoS ONE 2011;6(7):e21800.\n')
+    
+    log_message(log_path, f'\n  Saved summary: {summary_path}')
+    log_message(log_path, '')
+    log_message(log_path, '=' * 50)
+    log_message(log_path, 'REVIGO filtering complete!')
+    log_message(log_path, '=' * 50)
 
 
 # =============================================================================
@@ -1450,8 +1927,8 @@ def main():
     parser.add_argument(
         '--input', '-i',
         type=str,
-        required=True,
-        help='Path to all_proteins_categorized.csv'
+        required=False,
+        help='Path to all_proteins_categorized.csv (required for normal mode)'
     )
     parser.add_argument(
         '--output_dir', '-o',
@@ -1478,6 +1955,20 @@ def main():
         help='FDR threshold for pathway enrichment (default: 0.05)'
     )
     
+    # REVIGO mode arguments
+    parser.add_argument(
+        '--revigo', '-r',
+        type=str,
+        default=None,
+        help='Path to REVIGO output table (TSV). Enables REVIGO filtering mode.'
+    )
+    parser.add_argument(
+        '--original_results',
+        type=str,
+        default=None,
+        help='Path to original pathway_analysis results directory (required for REVIGO mode)'
+    )
+    
     args = parser.parse_args()
     
     # ---------------------------------------------------------------------
@@ -1486,6 +1977,28 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(args.log_dir, exist_ok=True)
     log_path = setup_logging(args.log_dir)
+    
+    # ---------------------------------------------------------------------
+    # Check for REVIGO mode
+    # ---------------------------------------------------------------------
+    if args.revigo:
+        # Run in REVIGO filtering mode
+        log_message(log_path, '=' * 50)
+        log_message(log_path, 'KETAMINE PROTEOMICS ANALYSIS PROJECT')
+        log_message(log_path, 'Pathway Enrichment Analysis - REVIGO MODE')
+        log_message(log_path, '=' * 50)
+        log_message(log_path, f'REVIGO input:      {args.revigo}')
+        log_message(log_path, f'Original results:  {args.original_results}')
+        log_message(log_path, f'Output directory:  {args.output_dir}')
+        
+        run_revigo_mode(args, log_path)
+        return
+    
+    # ---------------------------------------------------------------------
+    # Normal mode - validate inputs
+    # ---------------------------------------------------------------------
+    if not args.input:
+        raise ValueError('--input is required for normal mode (use --revigo for REVIGO filtering mode)')
     
     log_message(log_path, '=' * 50)
     log_message(log_path, 'KETAMINE PROTEOMICS ANALYSIS PROJECT')
