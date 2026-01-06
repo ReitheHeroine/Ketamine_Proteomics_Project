@@ -32,6 +32,10 @@ venv/
 *.conda
 *.yaml
 
+# Documentation (local only)
+project_notes/
+literature/
+
 # macOS system files
 .DS_Store
 ._*
