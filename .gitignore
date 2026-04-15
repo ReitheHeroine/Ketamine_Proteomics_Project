@@ -30,7 +30,8 @@ logs/
 .env/
 venv/
 *.conda
-*.yaml
+environment*.yaml
+env*.yaml
 
 # Documentation (local only)
 project_notes/

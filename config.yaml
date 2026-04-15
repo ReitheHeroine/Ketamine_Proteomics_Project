@@ -1,0 +1,360 @@
+# ==============================================================================
+# title: config.yaml
+# project: Ketamine Proteomics Analysis Project
+# author: Reina Hastings
+# contact: reinahastings13@gmail.com
+# date created: 2025-12-09
+# last modified: 2025-12-10
+#
+# purpose:
+#   Configuration file for Snakemake workflow. Defines all paths, parameters,
+#   and thresholds for the ketamine proteomics differential abundance and
+#   pathway enrichment analysis pipeline.
+#
+#   Edit these values to change analysis parameters without modifying the
+#   Snakefile. All parameters are documented with their purpose and options.
+#
+# usage:
+#   Option 1: Edit this file directly
+#   Option 2: Override on command line:
+#     snakemake --cores 1 --config pval=0.1 fc=2.0
+#     snakemake --cores 1 --config run_revigo=true
+# ==============================================================================
+
+
+# ==============================================================================
+# PROJECT METADATA
+# ==============================================================================
+# Descriptive information about the project (used in reports and logs)
+
+project:
+  name: 'Ketamine Proteomics'
+  description: 'Differential protein abundance analysis of ketamine effects on post-stroke cortical astrocytes'
+  organism: 'Mus musculus'
+  organism_code: 'mmusculus'    # g:Profiler organism code
+  treatment: 'Ketamine (10 mg/kg IP) vs Saline control'
+
+
+# ==============================================================================
+# DIRECTORY STRUCTURE
+# ==============================================================================
+# All paths are relative to the Snakefile location
+
+directories:
+  data: 'data'                              # Input data (Proteome Discoverer exports)
+  results: 'results'                        # All output files
+  scripts: 'scripts'                        # Analysis scripts
+  logs: 'logs'                              # Log files with timestamps
+  
+  # Subdirectories (created automatically)
+  diff_abundance: 'results/diff_abundance'  # Differential abundance outputs
+  figures: 'results/figures'                # Visualization outputs
+  pathway: 'results/pathway_analysis'       # Pathway enrichment outputs
+  revigo: 'results/pathway_analysis/revigo' # REVIGO-filtered outputs (if enabled)
+
+
+# ==============================================================================
+# INPUT DATA FILES
+# ==============================================================================
+# Proteome Discoverer 3.1 exports, organized by where high-confidence MS2
+# identification was achieved.
+#
+# IMPORTANT: These file assignments reflect MS2 identification location,
+# NOT necessarily biological presence/absence. A protein in "ketamine_only"
+# may still be present in control samples but lacked high-confidence MS2
+# identification due to DDA stochastic sampling.
+
+input_files:
+  # Proteins with high-confidence MS2 ID in BOTH conditions
+  # These have reliable abundance ratios for quantitative comparison
+  both_conditions: 'data/proteins_control_ketamine.csv'
+
+  # Proteins with high-confidence MS2 ID only in KETAMINE samples
+  # Assigned placeholder ratio = 100 by Proteome Discoverer
+  ketamine_only: 'data/proteins_ketamine.csv'
+
+  # Proteins with high-confidence MS2 ID only in CONTROL samples
+  # Assigned placeholder ratio = 0.01 by Proteome Discoverer
+  control_only: 'data/proteins_control.csv'
+
+
+# ==============================================================================
+# SAMPLE INFORMATION
+# ==============================================================================
+# Sample-to-group mapping for reference
+#
+# Technical replicates (F5, F11) are LC-MS reinjections of the same biological
+# sample. They assess instrument reproducibility but do NOT increase effective
+# sample size for biological conclusions. For statistics: n=3 per group.
+
+samples:
+  control:
+    ids: ['F1', 'F4', 'F5', 'F9']
+    technical_replicates: ['F5']           # LC-MS reinjection
+    n_biological: 3                        # Effective sample size
+  
+  ketamine:
+    ids: ['F2', 'F6', 'F10', 'F11']
+    technical_replicates: ['F11']          # LC-MS reinjection
+    n_biological: 3                        # Effective sample size
+
+
+# ==============================================================================
+# DIFFERENTIAL ABUNDANCE PARAMETERS
+# ==============================================================================
+
+diff_abundance:
+  # ---------------------------------------------------------------------------
+  # Significance Thresholds
+  # ---------------------------------------------------------------------------
+  
+  # P-value threshold for calling differential expression
+  # Note: No multiple testing correction at protein level. Pathway analysis
+  # applies FDR correction, which provides biological context for interpreting
+  # individual protein hits.
+  # Common values: 0.05 (standard), 0.01 (stringent), 0.1 (exploratory)
+  pval_threshold: 0.05
+  
+  # Log2 fold-change threshold for visualization (volcano plot coloring)
+  # Set to 0 to color all significant proteins regardless of effect size
+  # Set to 0.585 for |FC| >= 1.5, or 1.0 for |FC| >= 2.0
+  log2fc_threshold: 0
+  
+  # Fold-change threshold (linear scale, for reporting)
+  fc_threshold: 1.5
+  
+  # ---------------------------------------------------------------------------
+  # Statistical Testing
+  # ---------------------------------------------------------------------------
+  
+  # Test method for comparing groups
+  # Options:
+  #   'welch'   - Welch's t-test (unequal variances, RECOMMENDED for small n)
+  #   'student' - Student's t-test (equal variances assumed)
+  test_method: 'welch'
+  
+  # ---------------------------------------------------------------------------
+  # Placeholder Ratio Handling
+  # ---------------------------------------------------------------------------
+  # Proteome Discoverer assigns these values when a protein is only
+  # quantifiable in one condition. These are FLAGS, not real fold changes!
+  
+  placeholder_ratios:
+    ketamine_high: 100    # Protein quantifiable in ketamine, not control
+    control_high: 0.01    # Protein quantifiable in control, not ketamine
+  
+  # How to handle presence/absence proteins
+  # Options:
+  #   'separate' - Analyze separately from quantitative proteins (RECOMMENDED)
+  #   'include'  - Include in quantitative analysis (not recommended)
+  presence_absence_handling: 'separate'
+
+
+# ==============================================================================
+# PATHWAY ENRICHMENT PARAMETERS
+# ==============================================================================
+
+pathway_analysis:
+  # ---------------------------------------------------------------------------
+  # Gene Set Definitions
+  # ---------------------------------------------------------------------------
+  # How to construct gene sets for over-representation analysis (ORA)
+  
+  gene_sets:
+    upregulated:
+      # Include proteins significantly upregulated (p <= threshold)
+      include_significant_up: true
+      # Include ketamine-specific presence/absence proteins
+      # Rationale: Both represent proteins more abundant in ketamine condition
+      include_ketamine_specific: true
+    
+    downregulated:
+      # Include proteins significantly downregulated (p <= threshold)
+      include_significant_down: true
+      # Include control-specific presence/absence proteins
+      # Rationale: Both represent proteins less abundant in ketamine condition
+      include_control_specific: true
+  
+  # ---------------------------------------------------------------------------
+  # Database Selection
+  # ---------------------------------------------------------------------------
+  # Pathway databases to query via g:Profiler
+  #
+  # GO:BP - Gene Ontology Biological Process (hierarchical, comprehensive)
+  #         Note: Results often show redundancy due to parent-child relationships
+  # GO:MF - Gene Ontology Molecular Function
+  # GO:CC - Gene Ontology Cellular Component
+  # KEGG  - KEGG Pathways (flat structure, non-redundant, includes diagrams)
+  # REAC  - Reactome Pathways
+  # WP    - WikiPathways
+  
+  sources:
+    - 'GO:BP'
+    - 'KEGG'
+  
+  # ---------------------------------------------------------------------------
+  # Statistical Parameters
+  # ---------------------------------------------------------------------------
+  
+  # FDR threshold for enrichment significance
+  fdr_threshold: 0.05
+  
+  # Multiple testing correction method
+  # Options:
+  #   'g_SCS'       - g:Profiler native method (Set Counts and Sizes, RECOMMENDED)
+  #   'fdr'         - Benjamini-Hochberg FDR
+  #   'bonferroni'  - Bonferroni correction (very conservative)
+  correction_method: 'g_SCS'
+  
+  # ---------------------------------------------------------------------------
+  # Background Set
+  # ---------------------------------------------------------------------------
+  # Use all detected proteins as statistical background (RECOMMENDED)
+  # This gives more accurate statistics than using the whole genome, because
+  # it reflects what could actually have been observed in this experiment.
+  
+  use_custom_background: true
+
+
+# ==============================================================================
+# REVIGO PARAMETERS (Optional GO Term Redundancy Reduction)
+# ==============================================================================
+# REVIGO clusters semantically similar GO terms and selects representatives.
+# Useful for reducing the 274 GO:BP terms to a non-redundant set.
+#
+# Workflow:
+#   1. Run pathway analysis (generates REVIGO_input_GO_BP.txt)
+#   2. Upload to http://revigo.irb.hr/, download results
+#   3. Place results in data/Revigo_BP_Table.tsv
+#   4. Re-run with run_revigo: true
+#
+# Reference: Supek et al. (2011) PLoS ONE 6(7):e21800
+
+revigo:
+  # Enable REVIGO integration (requires manual web step)
+  enabled: false
+  
+  # Similarity threshold for clustering (set on REVIGO website)
+  # Options: 0.9 (large/least reduction), 0.7 (medium), 0.5 (small), 0.4 (tiny)
+  similarity_threshold: 0.7
+  
+  # Input file (auto-generated by pathway_analysis.py)
+  input_file: 'results/pathway_analysis/REVIGO_input_GO_BP.txt'
+  
+  # Output file (downloaded from REVIGO website, place in data/)
+  output_file: 'data/Revigo_BP_Table.tsv'
+
+
+# ==============================================================================
+# VISUALIZATION PARAMETERS
+# ==============================================================================
+
+visualization:
+  # ---------------------------------------------------------------------------
+  # Output Formats
+  # ---------------------------------------------------------------------------
+  formats:
+    - 'pdf'    # Publication-ready static figures
+    - 'html'   # Interactive figures (zoomable, hoverable)
+  
+  # ---------------------------------------------------------------------------
+  # Volcano Plot Settings
+  # ---------------------------------------------------------------------------
+  volcano:
+    point_size: 8
+    alpha: 0.7
+    colors:
+      upregulated: '#e74c3c'       # Red
+      downregulated: '#3498db'     # Blue
+      not_significant: '#95a5a6'   # Gray
+    # Highlight top N proteins by significance
+    label_top_n: 10
+  
+  # ---------------------------------------------------------------------------
+  # MA Plot Settings
+  # ---------------------------------------------------------------------------
+  ma_plot:
+    point_size: 8
+    alpha: 0.7
+    colors:
+      upregulated: '#e74c3c'
+      downregulated: '#3498db'
+      not_significant: '#95a5a6'
+  
+  # ---------------------------------------------------------------------------
+  # Pathway Visualization Settings
+  # ---------------------------------------------------------------------------
+  pathway:
+    # Maximum terms to display in bar/dot plots
+    max_terms: 20
+    
+    # Color scheme
+    bar_color: '#2ecc71'           # Green for bar plots
+    colorscale: 'Viridis'          # For dot plots (significance gradient)
+    
+    # Label handling for long pathway names
+    # Options: 'truncate' (cut off), 'wrap' (two-line, RECOMMENDED)
+    label_handling: 'wrap'
+    max_label_chars: 50            # For truncation mode
+    wrap_chars_per_line: 35        # For wrap mode
+  
+  # ---------------------------------------------------------------------------
+  # Publication Figure Settings
+  # ---------------------------------------------------------------------------
+  publication:
+    # Figure dimensions (inches)
+    width: 16
+    height: 14
+    
+    # DPI for raster outputs
+    dpi: 300
+    
+    # Font settings
+    font_family: 'Arial'
+    title_font_size: 14
+    axis_font_size: 12
+    tick_font_size: 10
+
+
+# ==============================================================================
+# LOGGING AND REPORTING
+# ==============================================================================
+
+logging:
+  # Log level: DEBUG, INFO, WARNING, ERROR
+  level: 'INFO'
+  
+  # Include timestamp in log filenames
+  timestamp_logs: true
+  
+  # Format: 'detailed' or 'simple'
+  format: 'detailed'
+
+
+# ==============================================================================
+# NOTES ON KEY ANALYSIS DECISIONS
+# ==============================================================================
+# This section documents rationale for parameter choices (for future reference)
+#
+# 1. P-value threshold (0.05) without multiple testing correction:
+#    - Individual protein p-values are exploratory
+#    - Biological interpretation comes from pathway-level FDR
+#    - With n=3, statistical power is limited anyway
+#
+# 2. Gene set definitions (including presence/absence):
+#    - Ketamine-specific proteins may represent true upregulation OR
+#      technical MS2 sampling bias - we include them but interpret cautiously
+#    - Combining with significant proteins provides larger gene sets for ORA
+#
+# 3. Custom background (detected proteins only):
+#    - More accurate than whole genome background
+#    - Reflects the protein universe actually observable in this experiment
+#
+# 4. GO:BP + KEGG (not other databases):
+#    - GO:BP provides comprehensive biological process coverage
+#    - KEGG provides non-redundant, pathway-diagram-ready results
+#    - Other databases (Reactome, WikiPathways) can be added if needed
+#
+# 5. REVIGO not enabled by default:
+#    - KEGG results are already non-redundant
+#    - REVIGO is available if GO redundancy reduction needed for publication
