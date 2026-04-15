@@ -36,6 +36,7 @@ env*.yaml
 # Documentation (local only)
 project_notes/
 literature/
+thesis/
 
 # macOS system files
 .DS_Store
