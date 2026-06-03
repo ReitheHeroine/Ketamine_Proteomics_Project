@@ -3,13 +3,20 @@
 # author: Reina Hastings
 # contact: reinahastings13@gmail.com
 # date created: 2025-12-09
-# last modified: 2026-01-05
+# last modified: 2026-06-01
 #
 # purpose:
 #   Perform pathway enrichment analysis on differential abundance results using
-#   over-representation analysis (ORA). Queries GO Biological Process and KEGG
-#   databases via gProfiler. Analyzes upregulated and downregulated protein sets
-#   separately, including presence/absence proteins.
+#   over-representation analysis (ORA). Queries GO Biological Process, KEGG, and
+#   Reactome (REAC) databases via gProfiler. Analyzes upregulated and
+#   downregulated protein sets separately, including presence/absence proteins.
+#
+#   Databases are selectable with --sources (default: GO:BP KEGG; pass REAC to
+#   add Reactome). Each source also emits a <set>_<token>_full.csv carrying
+#   effective_domain_size and intersection gene symbols, which the GSEA-style
+#   ORA figure scripts (plot_ora_lollipops.py, plot_ora_publication_figure.py)
+#   consume offline. --enrich-only / --full-only run targeted, non-clobbering
+#   source additions (see usage).
 #
 #   Also supports REVIGO filtering mode to reduce GO term redundancy.
 #
@@ -58,6 +65,16 @@
 #
 #   copy/paste: python pathway_analysis.py --input ../results/combined/all_proteins_categorized.csv --output_dir ../results/pathway_analysis --log_dir ../logs --pval_threshold 0.05 --fdr_threshold 0.05
 #
+#   # Add Reactome only (clean + _full CSVs; no figures/summary/report)
+#   python pathway_analysis.py --input data/all_proteins_categorized.csv \
+#       --output_dir results/pathway_analysis --log_dir logs \
+#       --sources REAC --enrich-only
+#
+#   # Backfill _full CSVs for GO:BP/KEGG without touching their clean CSVs
+#   python pathway_analysis.py --input data/all_proteins_categorized.csv \
+#       --output_dir results/pathway_analysis --log_dir logs \
+#       --sources "GO:BP" KEGG --full-only
+#
 #   # REVIGO mode - filter GO terms using REVIGO output
 #   python pathway_analysis.py \
 #       --revigo ../results/pathway_analysis/revigo/Revigo_BP_Table.tsv \
@@ -95,6 +112,19 @@ from scipy.spatial.distance import pdist
 # CONFIGURATION AND CONSTANTS
 # =============================================================================
 
+# --- g:Profiler version pin ---
+# Pinned to the archived release that was live on 2026-01-06, when this
+# analysis was first run for the thesis. Without pinning, g:Profiler serves
+# whichever GO + Ensembl bundle is currently live; that bundle was refreshed
+# on 2026-01-23 (GO release classes/2026-01-23) and the term sizes, gene
+# annotations, and FDR rankings drifted noticeably between runs. Pinning
+# the base_url to gprofiler_archive3/e113_eg59_p19 (GO classes/2025-03-16,
+# Ensembl 113, Ensembl Genomes 59) reproduces the 2026-01-06 enrichment
+# table exactly (verified against documented top-6 terms in
+# results/tables/GO_BP_enrichment_lollipop_for_llm.md).
+# Archive index: https://biit.cs.ut.ee/gprofiler/api/util/list_archives
+GPROFILER_ARCHIVE_URL = 'https://biit.cs.ut.ee/gprofiler_archive3/e113_eg59_p19/'
+
 # Column names from input data
 GENE_COL = 'Gene Symbol'
 CATEGORY_COL = 'category'
@@ -103,7 +133,38 @@ PVAL_COL = 'Abundance Ratio Adj. P-Value: (ketamine) / (control)'
 
 # gProfiler settings
 ORGANISM = 'mmusculus'  # Mus musculus (mouse)
-SOURCES = ['GO:BP', 'KEGG']  # GO Biological Process and KEGG
+SOURCES = ['GO:BP', 'KEGG']  # Default sources; overridable via --sources
+#   GO:BP = GO Biological Process, KEGG = KEGG pathways, REAC = Reactome.
+
+# --- Source naming helpers ---------------------------------------------------
+# Map a gProfiler source token to (a) a human-readable display name used in
+# figure titles/reports and (b) a filesystem-safe token used in output
+# filenames. Centralizing these avoids the scattered
+# "'GO Biological Process' if source == 'GO:BP' else 'KEGG Pathways'" ternaries
+# and lets Reactome (REAC) be labelled/filed correctly. REAC has no colon, so
+# the legacy source.replace(':', '_') idiom would have produced 'REAC'; the
+# token map yields 'Reactome' to mirror the GSEA naming scheme.
+SOURCE_DISPLAY_NAMES = {
+    'GO:BP': 'GO Biological Process',
+    'KEGG': 'KEGG Pathways',
+    'REAC': 'Reactome Pathways',
+}
+SOURCE_FILE_TOKENS = {
+    'GO:BP': 'GO_BP',
+    'KEGG': 'KEGG',
+    'REAC': 'Reactome',
+}
+
+
+def source_display_name(source):
+    '''Human-readable database name for figure titles and reports.'''
+    return SOURCE_DISPLAY_NAMES.get(source, source)
+
+
+def source_file_token(source):
+    '''Filesystem-safe database token for output filenames (REAC -> Reactome).'''
+    return SOURCE_FILE_TOKENS.get(source, source.replace(':', '_'))
+
 
 # Visual constants
 COLOR_UP = '#D62728'       # Red for upregulated
@@ -245,8 +306,8 @@ def run_gprofiler_enrichment(gene_list, background, source, log_path):
         pd.DataFrame: Enrichment results
     '''
     log_message(log_path, f'    Querying {source}...')
-    
-    gp = GProfiler(return_dataframe=True)
+
+    gp = GProfiler(return_dataframe=True, base_url=GPROFILER_ARCHIVE_URL)
     
     try:
         results = gp.profile(
@@ -271,10 +332,19 @@ def run_gprofiler_enrichment(gene_list, background, source, log_path):
         return pd.DataFrame()
 
 
-def run_pathway_analysis(gene_list, background, set_name, output_dir, log_path, fdr_threshold):
+def run_pathway_analysis(gene_list, background, set_name, output_dir, log_path,
+                         fdr_threshold, write_clean=True):
     '''
-    Run full pathway analysis for a gene set (GO:BP and KEGG).
-    
+    Run full pathway analysis for a gene set across the configured SOURCES.
+
+    For every source two artifacts can be written:
+      - the "clean" CSV (<set>_<token>.csv): the curated, renamed columns used
+        by the legacy in-script figures and the thesis tables.
+      - the "_full" CSV (<set>_<token>_full.csv): always written. Carries the
+        extra fields the GSEA-style ORA figure scripts need offline, namely
+        effective_domain_size (for fold enrichment) and the semicolon-joined
+        intersection gene symbols (the ORA analog of GSEA core_enrichment).
+
     Parameters:
         gene_list (list): List of gene symbols
         background (list): Background gene list
@@ -282,7 +352,10 @@ def run_pathway_analysis(gene_list, background, set_name, output_dir, log_path, 
         output_dir (str): Directory for outputs
         log_path (str): Path to log file
         fdr_threshold (float): FDR threshold for significance
-    
+        write_clean (bool): If False, skip writing the clean CSV and only emit
+            the _full CSV. Used to backfill _full files for GO:BP/KEGG without
+            overwriting their already-committed clean CSVs.
+
     Returns:
         dict: Results for each source
     '''
@@ -344,16 +417,71 @@ def run_pathway_analysis(gene_list, background, set_name, output_dir, log_path, 
                 )
             
             results[source] = {'clean': df_clean, 'full': full_results}
-            
-            # Save to CSV
-            source_name = source.replace(':', '_')
-            csv_path = os.path.join(set_output_dir, f'{set_name}_{source_name}.csv')
-            df_clean.to_csv(csv_path, index=False)
-            log_message(log_path, f'      Saved: {csv_path}')
+
+            source_name = source_file_token(source)
+
+            # --- Clean CSV (legacy figures + thesis tables) -------------------
+            if write_clean:
+                csv_path = os.path.join(set_output_dir,
+                                        f'{set_name}_{source_name}.csv')
+                df_clean.to_csv(csv_path, index=False)
+                log_message(log_path, f'      Saved: {csv_path}')
+
+            # --- Full CSV (offline inputs for GSEA-style ORA figures) ---------
+            # Always written. Adds effective_domain_size (denominator for fold
+            # enrichment) and the intersection gene symbols, neither of which
+            # survive into the clean CSV.
+            full_csv_path = os.path.join(set_output_dir,
+                                         f'{set_name}_{source_name}_full.csv')
+            write_full_results_csv(df_sig, full_csv_path, log_path)
         else:
             results[source] = {'clean': pd.DataFrame(), 'full': full_results}
-    
+
     return results
+
+
+def write_full_results_csv(df_sig, out_path, log_path):
+    '''
+    Persist the significant gProfiler rows with the fields the GSEA-style ORA
+    figure scripts consume offline.
+
+    Columns (mirrors the clean CSV where they overlap, plus the two extras):
+        term_id, term_name, fdr_pvalue, term_size, query_size,
+        intersection_size, effective_domain_size, precision, recall,
+        intersection_genes (semicolon-joined gene symbols)
+
+    The gProfiler 'intersections' column is a Python list of gene symbols when
+    the query was run with no_evidences=False; it is serialized here as a
+    ';'-joined string so the CSV round-trips cleanly.
+    '''
+    def _join_intersections(value):
+        # gProfiler returns a list of gene symbols; guard against the rare
+        # NaN / string fallbacks seen elsewhere in this module.
+        if isinstance(value, list):
+            return ';'.join(str(g) for g in value)
+        if isinstance(value, str):
+            return ';'.join(g.strip() for g in value.split(',') if g.strip())
+        return ''
+
+    cols = ['native', 'name', 'p_value', 'term_size', 'query_size',
+            'intersection_size', 'effective_domain_size', 'precision',
+            'recall']
+    available = [c for c in cols if c in df_sig.columns]
+    df_full = df_sig[available].copy()
+    df_full = df_full.rename(columns={
+        'native': 'term_id',
+        'name': 'term_name',
+        'p_value': 'fdr_pvalue',
+    })
+    if 'intersections' in df_sig.columns:
+        df_full['intersection_genes'] = df_sig['intersections'].apply(
+            _join_intersections
+        ).values
+    else:
+        df_full['intersection_genes'] = ''
+    df_full = df_full.sort_values('fdr_pvalue')
+    df_full.to_csv(out_path, index=False)
+    log_message(log_path, f'      Saved: {out_path}')
 
 
 # =============================================================================
@@ -403,7 +531,7 @@ def create_enrichment_bar_plot(df, source, set_name, output_dir, log_path, n_ter
     ))
     
     # Format source name for title
-    source_display = 'GO Biological Process' if source == 'GO:BP' else 'KEGG Pathways'
+    source_display = source_display_name(source)
     direction_display = 'Upregulated' if set_name == 'upregulated' else 'Downregulated'
     revigo_label = ' (REVIGO filtered)' if filename_suffix else ''
     
@@ -428,7 +556,7 @@ def create_enrichment_bar_plot(df, source, set_name, output_dir, log_path, n_ter
     )
     
     # Save outputs
-    source_name = source.replace(':', '_')
+    source_name = source_file_token(source)
     set_output_dir = os.path.join(output_dir, set_name)
     
     pdf_path = os.path.join(set_output_dir, f'{set_name}_{source_name}_plot{filename_suffix}.pdf')
@@ -486,7 +614,7 @@ def create_dot_plot(df, source, set_name, output_dir, log_path, n_terms=15, file
     ))
     
     # Format source name for title
-    source_display = 'GO Biological Process' if source == 'GO:BP' else 'KEGG Pathways'
+    source_display = source_display_name(source)
     direction_display = 'Upregulated' if set_name == 'upregulated' else 'Downregulated'
     revigo_label = ' (REVIGO filtered)' if filename_suffix else ''
     
@@ -511,7 +639,7 @@ def create_dot_plot(df, source, set_name, output_dir, log_path, n_terms=15, file
     )
     
     # Save outputs
-    source_name = source.replace(':', '_')
+    source_name = source_file_token(source)
     set_output_dir = os.path.join(output_dir, set_name)
     
     pdf_path = os.path.join(set_output_dir, f'{set_name}_{source_name}_dotplot{filename_suffix}.pdf')
@@ -540,7 +668,7 @@ def create_results_table(df, source, set_name, output_dir, log_path, filename_su
         return
     
     # Format source name for display
-    source_display = 'GO Biological Process' if source == 'GO:BP' else 'KEGG Pathways'
+    source_display = source_display_name(source)
     direction_display = 'Upregulated' if set_name == 'upregulated' else 'Downregulated'
     header_color = COLOR_UP if set_name == 'upregulated' else COLOR_DOWN
     
@@ -651,7 +779,7 @@ def create_results_table(df, source, set_name, output_dir, log_path, filename_su
 '''
     
     # Save HTML
-    source_name = source.replace(':', '_')
+    source_name = source_file_token(source)
     set_output_dir = os.path.join(output_dir, set_name)
     html_path = os.path.join(set_output_dir, f'{set_name}_{source_name}_table{filename_suffix}.html')
     
@@ -862,7 +990,7 @@ def create_gene_term_network(df, source, set_name, output_dir, log_path, enrichm
     )
     
     # Create figure
-    source_display = 'GO Biological Process' if source == 'GO:BP' else 'KEGG Pathways'
+    source_display = source_display_name(source)
     direction_display = 'Upregulated' if set_name == 'upregulated' else 'Downregulated'
     
     fig = go.Figure(data=[edge_trace, gene_trace, term_trace])
@@ -885,7 +1013,7 @@ def create_gene_term_network(df, source, set_name, output_dir, log_path, enrichm
     )
     
     # Save outputs
-    source_name = source.replace(':', '_')
+    source_name = source_file_token(source)
     set_output_dir = os.path.join(output_dir, set_name)
     
     pdf_path = os.path.join(set_output_dir, f'{set_name}_{source_name}_network{filename_suffix}.pdf')
@@ -1024,7 +1152,7 @@ def create_term_clustering(df, source, set_name, output_dir, log_path, enrichmen
     # ---------------------------------------------------------------------
     # Create clustered bar plot
     # ---------------------------------------------------------------------
-    source_display = 'GO Biological Process' if source == 'GO:BP' else 'KEGG Pathways'
+    source_display = source_display_name(source)
     direction_display = 'Upregulated' if set_name == 'upregulated' else 'Downregulated'
     
     # Generate colors for clusters
@@ -1076,7 +1204,7 @@ def create_term_clustering(df, source, set_name, output_dir, log_path, enrichmen
     )
     
     # Save outputs
-    source_name = source.replace(':', '_')
+    source_name = source_file_token(source)
     set_output_dir = os.path.join(output_dir, set_name)
     
     pdf_path = os.path.join(set_output_dir, f'{set_name}_{source_name}_clustered.pdf')
@@ -1242,21 +1370,27 @@ def create_publication_figure(df, source, set_name, output_dir, log_path,
         [{'type': 'heatmap'}] * 3
     ]
     
-    # Build subplot titles with wrapped names to prevent overlap
-    subplot_titles = ['A. Top Biological Functions (by significance)']
-    
+    # --- Subplot titles: descriptive subheading only ---
+    # Per style guide section 3, in-figure subheadings are 12 pt bold sentence case.
+    # Panel letters (A, B, C, ...) are placed separately at the upper-left corner
+    # of each panel via add_annotation() at 15 pt bold (see section 3 + 11.1).
+    def _sentence_case(s):
+        return s[0].upper() + s[1:] if s else s
+
+    subplot_titles = [f'<b>Top biological functions</b>']
+
     # Row 2 panels: B, C, D
     for i in range(min(3, n_pathway_panels)):
-        name = wrap_label(ordered_term_names[i], 25)
-        subplot_titles.append(f'{chr(66 + i)}. {name}')
+        name = wrap_label(_sentence_case(ordered_term_names[i]), 25)
+        subplot_titles.append(f'<b>{name}</b>')
     # Pad row 2 if fewer than 3 panels
     while len(subplot_titles) < 4:
         subplot_titles.append('')
-    
+
     # Row 3 panels: E, F
     for i in range(3, n_pathway_panels):
-        name = wrap_label(ordered_term_names[i], 25)
-        subplot_titles.append(f'{chr(66 + i)}. {name}')
+        name = wrap_label(_sentence_case(ordered_term_names[i]), 25)
+        subplot_titles.append(f'<b>{name}</b>')
     # Pad row 3
     while len(subplot_titles) < 7:
         subplot_titles.append('')
@@ -1277,7 +1411,14 @@ def create_publication_figure(df, source, set_name, output_dir, log_path,
     # Wrap term names for display (allows two lines)
     display_term_names = [wrap_label(name, 35) for name in reversed(ordered_term_names)]
     heatmap_values = [[-np.log10(p)] for p in reversed(ordered_pvalues)]
-    
+
+    # Align the -log10(FDR) colorbar's top edge and full span to Panel A's
+    # plotting domain (the central "Top biological functions" heatmap).
+    # make_subplots() has already set yaxis.domain for subplot 1, so we read it here.
+    panel_a_y_domain = fig.layout.yaxis.domain
+    panel_a_top = panel_a_y_domain[1]
+    panel_a_height = panel_a_y_domain[1] - panel_a_y_domain[0]
+
     fig.add_trace(
         go.Heatmap(
             z=heatmap_values,
@@ -1286,13 +1427,18 @@ def create_publication_figure(df, source, set_name, output_dir, log_path,
             colorscale='Purples',
             showscale=True,
             colorbar=dict(
-                title=dict(text='-log₁₀(FDR)', font=dict(size=11)),
-                x=1.02,        # Move to right side (same position as log2FC colorbar)
-                len=0.28,
-                y=0.85,        # Position in upper portion
+                title=dict(
+                    text='-log<sub>10</sub>(FDR)',
+                    font=dict(size=14, color='#000000', family='Arial')
+                ),
+                tickfont=dict(size=12, color='#000000', family='Arial'),
+                x=1.02,
+                len=panel_a_height,
+                y=panel_a_top,
+                yanchor='top',
                 thickness=15
             ),
-            hovertemplate='<b>%{y}</b><br>-log₁₀(FDR): %{z:.2f}<extra></extra>'
+            hovertemplate='<b>%{y}</b><br>-log<sub>10</sub>(FDR): %{z:.2f}<extra></extra>'
         ),
         row=1, col=1
     )
@@ -1333,7 +1479,11 @@ def create_publication_figure(df, source, set_name, output_dir, log_path,
         sorted_data = sorted(zip(gene_names, gene_values), key=lambda x: x[1][0], reverse=False)
         gene_names = [x[0] for x in sorted_data]
         gene_values = [x[1] for x in sorted_data]
-        
+
+        # In a proteomics fold-change figure, the symbol labels the protein product
+        # detected in mass spec (style guide section 4.3): set in uppercase roman.
+        gene_names = [g.upper() for g in gene_names]
+
         # Determine row and column in 3-row layout
         if panel_idx < 3:
             plot_row = 2
@@ -1341,28 +1491,37 @@ def create_publication_figure(df, source, set_name, output_dir, log_path,
         else:
             plot_row = 3
             plot_col = panel_idx - 3 + 1
-        
+
         # Only show colorbar on the last panel
         show_colorbar = (panel_idx == n_pathway_panels - 1)
-        
+
+        # Project palette (style guide section 9.1.1):
+        #   down-in-ketamine -> control color #7FB3D8 (light blue)
+        #   up-in-ketamine   -> ketamine color #E8735A (coral)
+        # Replaces the previous green/red diverging scale, which violated
+        # the section 9.2 ban on red/green as the only distinguishing channel.
         fig.add_trace(
             go.Heatmap(
                 z=gene_values,
                 y=gene_names,
-                x=['log₂FC'],
-                colorscale=[[0, '#2CA02C'], [0.5, '#FFFFFF'], [1, '#D62728']],  # Green-White-Red
+                x=['log<sub>2</sub>FC'],
+                colorscale=[[0, '#7FB3D8'], [0.5, '#FFFFFF'], [1, '#E8735A']],
                 zmid=0,
                 zmin=-4,
                 zmax=4,
                 showscale=show_colorbar,
                 colorbar=dict(
-                    title=dict(text='log₂FC', font=dict(size=11)),
+                    title=dict(
+                        text='log<sub>2</sub>FC',
+                        font=dict(size=14, color='#000000', family='Arial')
+                    ),
+                    tickfont=dict(size=12, color='#000000', family='Arial'),
                     x=1.02,
                     len=0.28,
                     y=0.17,
                     thickness=15
                 ) if show_colorbar else None,
-                hovertemplate='<b>%{y}</b><br>log₂FC: %{z:.2f}<extra></extra>'
+                hovertemplate='<b>%{y}</b><br>log<sub>2</sub>FC: %{z:.2f}<extra></extra>'
             ),
             row=plot_row, col=plot_col
         )
@@ -1370,44 +1529,53 @@ def create_publication_figure(df, source, set_name, output_dir, log_path,
     # ---------------------------------------------------------------------
     # Update layout
     # ---------------------------------------------------------------------
-    source_display = 'GO Biological Process' if source == 'GO:BP' else 'KEGG Pathways'
-    direction_label = 'Upregulated' if set_name == 'upregulated' else 'Downregulated'
-    
+    # Per style guide section 11.2, no on-figure title is set. The figure
+    # number, title sentence, and "Upregulated proteins in Ketamine vs Control"
+    # statement all live in the Word document caption block below the figure.
     fig.update_layout(
-        title=dict(
-            text=f'<b>Pathway Enrichment Analysis: {source_display}</b><br>' +
-                 f'<span style="font-size:13px; color:#666">{direction_label} proteins in Ketamine vs Control</span>',
-            font=dict(size=18, family='Arial'),
-            x=0.5
-        ),
-        height=1000,
+        height=1300,
         width=1100,
         plot_bgcolor='white',
         paper_bgcolor='white',
-        font=dict(size=10, family='Arial'),
-        margin=dict(l=180, r=80, t=100, b=50)
+        font=dict(family='Arial', size=12, color='#000000'),
+        margin=dict(l=180, r=80, t=60, b=50)
     )
-    
-    # Update all axes fonts
-    fig.update_yaxes(tickfont=dict(size=10))
-    fig.update_xaxes(tickfont=dict(size=10))
-    
-    # Make gene names blue in gene panels (rows 2 and 3)
-    for row_idx in [2, 3]:
-        for col_idx in [1, 2, 3]:
-            fig.update_yaxes(
-                tickfont=dict(size=9, color='#1F77B4'),
-                row=row_idx, col=col_idx
-            )
-    
-    # Update subplot title fonts
+
+    # Tick labels: 12 pt black Arial across all panels (style guide section 3)
+    fig.update_yaxes(tickfont=dict(size=12, color='#000000', family='Arial'))
+    fig.update_xaxes(tickfont=dict(size=12, color='#000000', family='Arial'))
+
+    # Subplot-title annotations: 12 pt bold sentence case in black
+    # (Section 3 figure-interior subheading; bold is supplied by the <b> wrapper
+    # in subplot_titles, since plotly's annotation font dict has no weight key.)
     for annotation in fig['layout']['annotations']:
-        annotation['font'] = dict(size=11, color='#333333')
+        annotation['font'] = dict(size=12, color='#000000', family='Arial')
+
+    # Panel letters (A, B, C, ...): 15 pt bold black at upper-left of each
+    # panel's plotting domain (style guide section 3).
+    panel_axis_suffixes = ['', '2', '3', '4', '5', '6']
+    panel_letters = ['A', 'B', 'C', 'D', 'E', 'F']
+    n_total_panels = 1 + n_pathway_panels  # Panel A + pathway panels
+    for i in range(min(6, n_total_panels)):
+        ax_suffix = panel_axis_suffixes[i]
+        x_domain = fig.layout[f'xaxis{ax_suffix}'].domain
+        y_domain = fig.layout[f'yaxis{ax_suffix}'].domain
+        fig.add_annotation(
+            x=x_domain[0] - 0.005,
+            y=y_domain[1] + 0.015,
+            xref='paper',
+            yref='paper',
+            text=f'<b>{panel_letters[i]}</b>',
+            showarrow=False,
+            font=dict(size=15, color='#000000', family='Arial'),
+            xanchor='right',
+            yanchor='bottom'
+        )
     
     # ---------------------------------------------------------------------
     # Save outputs
     # ---------------------------------------------------------------------
-    source_name = source.replace(':', '_')
+    source_name = source_file_token(source)
     set_output_dir = os.path.join(output_dir, set_name)
     
     pdf_path = os.path.join(set_output_dir, f'{set_name}_{source_name}_publication_figure.pdf')
@@ -1440,7 +1608,7 @@ def generate_set_summary(results, gene_list, set_name, output_dir, fdr_threshold
         f.write(f'FDR threshold: {fdr_threshold}\n\n')
         
         for source in SOURCES:
-            source_display = 'GO Biological Process' if source == 'GO:BP' else 'KEGG Pathways'
+            source_display = source_display_name(source)
             f.write(f'\n{"-" * 50}\n')
             f.write(f'{source_display}\n')
             f.write(f'{"-" * 50}\n')
@@ -1541,16 +1709,36 @@ def generate_final_report(gene_sets, all_results, output_dir, pval_threshold, fd
         for set_name in ['upregulated', 'downregulated']:
             f.write(f'{set_name.upper()} - Top 10 GO:BP terms:\n')
             results = all_results.get(set_name, {})
-            result_data = results.get('GO:BP', {'clean': pd.DataFrame()})
-            df = result_data.get('clean', pd.DataFrame()) if isinstance(result_data, dict) else result_data
+            result_data = results.get('GO:BP', {'clean': pd.DataFrame(), 'full': pd.DataFrame()})
+            # Use 'full' results to get intersection data (gene lists)
+            df_full = result_data.get('full', pd.DataFrame()) if isinstance(result_data, dict) else result_data
+            df_clean = result_data.get('clean', pd.DataFrame()) if isinstance(result_data, dict) else result_data
 
-            if len(df) > 0:
-                for i, (_, row) in enumerate(df.head(10).iterrows(), 1):
+            if len(df_clean) > 0 and len(df_full) > 0:
+                # Get top 10 term IDs from clean, then look up full data
+                top_term_ids = df_clean.head(10)['term_id'].tolist() if 'term_id' in df_clean.columns else []
+
+                for i, (_, row) in enumerate(df_clean.head(10).iterrows(), 1):
                     term_name = row['term_name']
+                    term_id = row.get('term_id', '')
                     fdr = row['fdr_pvalue']
-                    gene_count = row.get('intersection_size', row.get('term_size', 'N/A'))
+                    gene_count = row.get('intersection_size', row.get('gene_count', 'N/A'))
+
+                    # Get genes from full results
+                    genes_str = ''
+                    if term_id and len(df_full) > 0:
+                        full_row = df_full[df_full['native'] == term_id]
+                        if len(full_row) > 0:
+                            genes = full_row.iloc[0].get('intersections', '')
+                            if isinstance(genes, list):
+                                genes_str = ', '.join(sorted(genes))
+                            elif isinstance(genes, str) and genes:
+                                genes_str = ', '.join(sorted(genes.split(',')))
+
                     f.write(f"  {i:2d}. {term_name}\n")
-                    f.write(f"      FDR = {fdr:.2e}, Genes = {gene_count}\n")
+                    f.write(f"      FDR = {fdr:.2e}, Gene count = {gene_count}\n")
+                    if genes_str:
+                        f.write(f"      Genes: {genes_str}\n")
             else:
                 f.write('  No significant terms found.\n')
             f.write('\n')
@@ -1565,28 +1753,33 @@ def generate_final_report(gene_sets, all_results, output_dir, pval_threshold, fd
         for set_name in ['upregulated', 'downregulated']:
             f.write(f'{set_name.upper()} - All KEGG pathways:\n')
             results = all_results.get(set_name, {})
-            result_data = results.get('KEGG', {'clean': pd.DataFrame()})
-            df = result_data.get('clean', pd.DataFrame()) if isinstance(result_data, dict) else result_data
+            result_data = results.get('KEGG', {'clean': pd.DataFrame(), 'full': pd.DataFrame()})
+            # Use 'full' results to get intersection data (gene lists)
+            df_full = result_data.get('full', pd.DataFrame()) if isinstance(result_data, dict) else result_data
+            df_clean = result_data.get('clean', pd.DataFrame()) if isinstance(result_data, dict) else result_data
 
-            if len(df) > 0:
-                for i, (_, row) in enumerate(df.iterrows(), 1):
+            if len(df_clean) > 0 and len(df_full) > 0:
+                for i, (_, row) in enumerate(df_clean.iterrows(), 1):
                     term_name = row['term_name']
                     term_id = row.get('term_id', row.get('native', 'N/A'))
                     fdr = row['fdr_pvalue']
-                    gene_count = row.get('intersection_size', row.get('term_size', 'N/A'))
-                    # Get genes if available
-                    genes = row.get('intersections', '')
-                    if isinstance(genes, str) and genes:
-                        gene_list = genes
-                    elif isinstance(genes, list):
-                        gene_list = ', '.join(genes)
-                    else:
-                        gene_list = ''
+                    gene_count = row.get('intersection_size', row.get('gene_count', 'N/A'))
+
+                    # Get genes from full results
+                    genes_str = ''
+                    if term_id and len(df_full) > 0:
+                        full_row = df_full[df_full['native'] == term_id]
+                        if len(full_row) > 0:
+                            genes = full_row.iloc[0].get('intersections', '')
+                            if isinstance(genes, list):
+                                genes_str = ', '.join(sorted(genes))
+                            elif isinstance(genes, str) and genes:
+                                genes_str = ', '.join(sorted(genes.split(',')))
 
                     f.write(f"  {i}. {term_name} ({term_id})\n")
                     f.write(f"     FDR = {fdr:.2e}, Gene count = {gene_count}\n")
-                    if gene_list:
-                        f.write(f"     Genes: {gene_list}\n")
+                    if genes_str:
+                        f.write(f"     Genes: {genes_str}\n")
             else:
                 f.write('  No significant pathways found.\n')
             f.write('\n')
@@ -1854,25 +2047,52 @@ def run_revigo_mode(args, log_path):
             filename_suffix='_revigo'
         )
         
-        # Gene-term network (need full results with intersections)
-        # Try to load from original if available
+        # -----------------------------------------------------------------
+        # Gene-term network, clustering, and publication figure require
+        # the full g:Profiler results (with 'intersections' column).
+        # The full results were not saved to disk in normal mode, so
+        # re-query g:Profiler to obtain them.
+        # -----------------------------------------------------------------
+        df_full_filtered = None
+
         go_bp_full_path = os.path.join(set_input_dir, f'{set_name}_GO_BP_full.csv')
         if os.path.exists(go_bp_full_path):
+            # If a full CSV was saved, use it
             df_full = pd.read_csv(go_bp_full_path)
-            # Filter full results too
             df_full_filtered = df_full[df_full['native'].isin(keep_terms)].copy()
-            
+        elif protein_data is not None:
+            # Re-query g:Profiler to get intersection data
+            log_message(log_path, f'    Full results CSV not found; re-querying g:Profiler for intersection data...')
+            gene_sets = load_and_prepare_gene_sets(args.input, 0.05, log_path)
+            gene_list = gene_sets.get(set_name, [])
+            background = gene_sets.get('background', [])
+            if len(gene_list) > 0:
+                df_full_query = run_gprofiler_enrichment(gene_list, background, source, log_path)
+                if len(df_full_query) > 0:
+                    df_full_filtered = df_full_query[df_full_query['native'].isin(keep_terms)].copy()
+                    log_message(log_path, f'    Re-query successful: {len(df_full_filtered)} REVIGO terms with intersection data')
+
+        if df_full_filtered is not None and len(df_full_filtered) > 0:
+            # Gene-term network
             create_gene_term_network(
                 df_filtered, source, set_name, revigo_output_dir, log_path,
                 df_full_filtered, filename_suffix='_revigo'
             )
-        
-        # Publication figure
-        if protein_data is not None and os.path.exists(go_bp_full_path):
-            create_publication_figure(
+
+            # Term clustering
+            create_term_clustering(
                 df_filtered, source, set_name, revigo_output_dir, log_path,
-                df_full_filtered, protein_data
+                df_full_filtered
             )
+
+            # Publication figure
+            if protein_data is not None:
+                create_publication_figure(
+                    df_filtered, source, set_name, revigo_output_dir, log_path,
+                    df_full_filtered, protein_data
+                )
+        else:
+            log_message(log_path, f'    Skipping network/clustering/publication figures (no intersection data available)')
         
         # ---------------------------------------------------------------------
         # Also copy KEGG results (unchanged by REVIGO)
@@ -1955,6 +2175,30 @@ def main():
         help='FDR threshold for pathway enrichment (default: 0.05)'
     )
     
+    # Source selection / targeted-run arguments
+    parser.add_argument(
+        '--sources',
+        nargs='+',
+        default=['GO:BP', 'KEGG'],
+        help=("gProfiler source tokens to query (default: GO:BP KEGG). Pass "
+              "REAC to add Reactome. Example: --sources REAC")
+    )
+    parser.add_argument(
+        '--enrich-only',
+        action='store_true',
+        help=("Run enrichment and write CSVs only; skip the legacy in-script "
+              "figures, per-set summaries, and the final report. Use this to "
+              "add a source (e.g. REAC) without clobbering the shared report "
+              "and summary files.")
+    )
+    parser.add_argument(
+        '--full-only',
+        action='store_true',
+        help=("Write only the <set>_<token>_full.csv files (skip the clean "
+              "CSVs). Implies --enrich-only. Use to backfill _full files for "
+              "GO:BP/KEGG without overwriting their committed clean CSVs.")
+    )
+
     # REVIGO mode arguments
     parser.add_argument(
         '--revigo', '-r',
@@ -1970,7 +2214,19 @@ def main():
     )
     
     args = parser.parse_args()
-    
+
+    # ---------------------------------------------------------------------
+    # Apply source selection + targeted-run semantics
+    #   --full-only implies --enrich-only (data-only backfill).
+    #   enrich_only => skip legacy figures, per-set summaries, final report so
+    #   targeted runs (e.g. adding REAC) do not clobber shared GO:BP/KEGG
+    #   outputs.
+    # ---------------------------------------------------------------------
+    global SOURCES
+    SOURCES = args.sources
+    enrich_only = args.enrich_only or args.full_only
+    write_clean = not args.full_only
+
     # ---------------------------------------------------------------------
     # Setup
     # ---------------------------------------------------------------------
@@ -2008,8 +2264,13 @@ def main():
     log_message(log_path, f'Output directory:  {args.output_dir}')
     log_message(log_path, f'P-value threshold: {args.pval_threshold}')
     log_message(log_path, f'FDR threshold:     {args.fdr_threshold}')
+    log_message(log_path, f'Sources:           {", ".join(SOURCES)}')
+    if enrich_only:
+        log_message(log_path, f'Mode:              enrich-only '
+                              f'(write_clean={write_clean}; figures/summary/'
+                              f'report skipped)')
     log_message(log_path, '')
-    
+
     # ---------------------------------------------------------------------
     # Load and prepare gene sets
     # ---------------------------------------------------------------------
@@ -2036,11 +2297,18 @@ def main():
             set_name=set_name,
             output_dir=args.output_dir,
             log_path=log_path,
-            fdr_threshold=args.fdr_threshold
+            fdr_threshold=args.fdr_threshold,
+            write_clean=write_clean
         )
-        
+
         all_results[set_name] = results
-        
+
+        # In enrich-only mode, stop after writing CSVs: skip the legacy
+        # in-script figures, the per-set summary, and (below) the final
+        # report so a targeted source run does not overwrite shared outputs.
+        if enrich_only:
+            continue
+
         # Create visualizations
         log_message(log_path, f'  Creating visualizations...')
         for source in SOURCES:
@@ -2086,13 +2354,15 @@ def main():
         )
     
     # ---------------------------------------------------------------------
-    # Generate final report
+    # Generate final report (skipped in enrich-only mode to preserve the
+    # existing GO:BP/KEGG report)
     # ---------------------------------------------------------------------
-    log_message(log_path, '')
-    generate_final_report(
-        gene_sets, all_results, args.output_dir, 
-        args.pval_threshold, args.fdr_threshold, log_path
-    )
+    if not enrich_only:
+        log_message(log_path, '')
+        generate_final_report(
+            gene_sets, all_results, args.output_dir,
+            args.pval_threshold, args.fdr_threshold, log_path
+        )
     
     # ---------------------------------------------------------------------
     # Finalize

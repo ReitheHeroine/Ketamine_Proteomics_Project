@@ -3,7 +3,9 @@
 # author: Reina Hastings
 # contact: reinahastings13@gmail.com
 # date created: 2025-12-09
-# last modified: 2025-12-09
+# last modified: 2026-05-27 (restyled create_summary_bar_chart per style guide;
+#                            volcano text bumped to ~1.5x slide variant and set
+#                            to black for presentation readability)
 #
 # purpose:
 #   Generate publication-quality visualizations for differential abundance
@@ -15,17 +17,13 @@
 #
 # outputs:
 #   results/figures/
-#   ├── volcano_plot.pdf
-#   ├── volcano_plot.html
-#   ├── ma_plot.pdf
-#   ├── ma_plot.html
-#   ├── summary_bar_chart.pdf
-#   ├── top_proteins_bar_chart.pdf
-#   ├── top_proteins_bar_chart.html
-#   ├── top20_upregulated_table.pdf
-#   ├── top20_upregulated_table.html
-#   ├── top20_downregulated_table.pdf
-#   └── top20_downregulated_table.html
+#   ├── volcano_plot.pdf/.png/.html
+#   ├── ma_plot.pdf/.png/.html
+#   ├── summary_bar_chart.pdf/.png
+#   ├── top_proteins_bar_chart.pdf/.png/.html
+#   ├── top20_upregulated_table.pdf/.png/.html
+#   ├── top20_downregulated_table.pdf/.png/.html
+#   ├── variability_fc_pvalue_relationship.pdf/.png/.html
 #
 # usage:
 #   python visualize_diff_abundance.py \
@@ -35,14 +33,17 @@
 #       --pval_threshold 0.05
 #
 #   copy/paste: python visualize_diff_abundance.py --input ../results/combined/all_proteins_categorized.csv --output_dir ../results/figures --log_dir ../logs --pval_threshold 0.05
-#
+#          
 # notes:
 #   - Volcano plot shows quantitative proteins only
 #   - Interactive HTML files can be opened in any web browser
+#   - Variability/FC/p-value plot shows statistical consistency of Proteome
+#     Discoverer output (quantitative proteins only)
 
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import argparse
 import os
 from datetime import datetime
@@ -63,6 +64,7 @@ SIGNIFICANT_COL = 'significant'
 ABUNDANCE_CONTROL_COL = 'Abundances (Grouped): control'
 ABUNDANCE_KETAMINE_COL = 'Abundances (Grouped): ketamine'
 SOURCE_FILE_COL = 'source_file'
+VARIABILITY_COL = 'Abundance Ratio Variability [%]: (ketamine) / (control)'
 
 # Visual constants
 COLOR_UP = '#D62728'       # Red for upregulated
@@ -161,117 +163,185 @@ def load_and_prepare_data(input_path, pval_threshold, log_path):
 def create_volcano_plot(df, pval_threshold, output_dir, log_path):
     '''
     Create volcano plot for quantitative proteins only.
-    Labels top 10 proteins by p-value.
+    Labels: Ina (most upregulated), the second most upregulated protein
+    by log2FC, and all significantly downregulated proteins.
+
+    Styled per project_notes/figure_and_table_style_guide.Rmd (2026-05-27).
+    Uses local color overrides rather than the module-level COLOR_UP/DOWN/NS
+    constants because the other figures in this script have not yet been
+    restyled (per the guide's "aspirational, not retroactive" rule).
     '''
     log_message(log_path, 'Creating volcano plot...')
-    
+
+    # ---------------------------------------------------------------------
+    # Local style constants (figure_and_table_style_guide.Rmd, 2026-05-27)
+    # ---------------------------------------------------------------------
+    SG_UP = '#E8735A'         # up-in-ketamine = ketamine series color (coral)
+    SG_DOWN = '#7FB3D8'       # down-in-ketamine = control series color (light blue)
+    SG_NS = '#999999'         # not significant (gray)
+    SG_THRESHOLD = '#666666'  # threshold / zero reference lines
+    SG_TEXT = '#000000'       # all text (presentation override; style guide default is #2C3E50)
+    SG_ARROW = '#888888'      # annotation leader lines (mid gray)
+    SG_GRID = '#E0E0E0'       # faint reference grid lines
+    FONT_FAMILY = 'Arial'
+
     # ---------------------------------------------------------------------
     # Filter to quantitative proteins only
     # ---------------------------------------------------------------------
     quant_df = df[df[CATEGORY_COL] == 'quantitative'].copy()
-    
+
     fig = go.Figure()
-    
+
     # ---------------------------------------------------------------------
     # Plot each group in order
     # ---------------------------------------------------------------------
     legend_order = [
-        ('Up in Ketamine (sig.)', COLOR_UP),
-        ('Down in Ketamine (sig.)', COLOR_DOWN),
-        ('Not significant', COLOR_NS),
+        ('Up in Ketamine (sig.)', SG_UP),
+        ('Down in Ketamine (sig.)', SG_DOWN),
+        ('Not significant', SG_NS),
     ]
-    
+
     for legend_name, color in legend_order:
         subset = quant_df[quant_df['legend_group'] == legend_name]
         if len(subset) == 0:
             continue
-            
+
         fig.add_trace(go.Scatter(
             x=subset[LOG2FC_COL],
             y=subset['neg_log10_pval'],
             mode='markers',
             marker=dict(
                 color=color,
-                size=8,
-                line=dict(width=0.5, color='white')
+                size=14,
+                line=dict(width=0.75, color='white')
             ),
             name=f'{legend_name} (n={len(subset)})',
             text=subset.apply(
                 lambda r: f"Gene: {r[GENE_COL]}<br>"
                           f"Accession: {r[ACCESSION_COL]}<br>"
-                          f"log2FC: {r[LOG2FC_COL]:.2f}<br>"
-                          f"p-value: {r[PVAL_COL]:.2e}",
+                          f"Log<sub>2</sub> FC: {r[LOG2FC_COL]:.2f}<br>"
+                          f"Adj. <i>p</i>-value: {r[PVAL_COL]:.2e}",
                 axis=1
             ),
             hoverinfo='text'
         ))
-    
+
     # ---------------------------------------------------------------------
     # Add significance threshold line
     # ---------------------------------------------------------------------
     fig.add_hline(
         y=-np.log10(pval_threshold),
         line_dash='dash',
-        line_color='black',
+        line_color=SG_THRESHOLD,
         line_width=1,
-        annotation_text=f'p = {pval_threshold}',
-        annotation_position='top right'
+        annotation_text=f'<i>p</i> = {pval_threshold}',
+        annotation_position='top right',
+        annotation_font=dict(size=18, color=SG_TEXT, family=FONT_FAMILY)
     )
-    
+
     # ---------------------------------------------------------------------
-    # Label top 10 proteins by p-value
+    # Label a curated subset of proteins:
+    #   - Ina (most upregulated by log2FC)
+    #   - Second most upregulated protein by log2FC
+    #   - All significantly downregulated proteins
+    # Per style guide section 4.3, protein labels in mass-spec figures are
+    # set in all-caps roman (e.g., INA, PLP1), not the mouse-gene convention
+    # (Ina, Plp1) used in the underlying data file.
     # ---------------------------------------------------------------------
-    top10 = quant_df.nsmallest(10, PVAL_COL)
-    
-    for _, row in top10.iterrows():
+    sig_df = quant_df[quant_df['significant']].copy()
+    sig_up = sig_df[sig_df[DIRECTION_COL] == 'up_in_ketamine']
+    sig_down = sig_df[sig_df[DIRECTION_COL] == 'down_in_ketamine']
+
+    # Top 2 upregulated by log2FC (expected: Ina first, then second-highest)
+    top_up = sig_up.nlargest(2, LOG2FC_COL)
+
+    # Combine: top 2 upregulated + all downregulated
+    labeled = pd.concat([top_up, sig_down])
+
+    log_message(log_path, f'  Labeling {len(labeled)} proteins on volcano plot:')
+    for _, row in labeled.iterrows():
+        log_message(log_path,
+                    f'    {row[GENE_COL]}: log2FC={row[LOG2FC_COL]:.2f}, '
+                    f'p={row[PVAL_COL]:.2e}')
+
+    for _, row in labeled.iterrows():
         fig.add_annotation(
             x=row[LOG2FC_COL],
             y=row['neg_log10_pval'],
-            text=row[GENE_COL],
+            text=row[GENE_COL].upper(),
             showarrow=True,
             arrowhead=0,
             arrowsize=0.5,
             arrowwidth=1,
-            ax=20,
-            ay=-20,
-            font=dict(size=9, color='black'),
+            arrowcolor=SG_ARROW,
+            ax=30,
+            ay=-30,
+            font=dict(size=18, color=SG_TEXT, family=FONT_FAMILY),
             bgcolor='rgba(255,255,255,0.7)',
             borderpad=2
         )
-    
+
     # ---------------------------------------------------------------------
     # Layout
     # ---------------------------------------------------------------------
+    # No on-figure title per style guide section 11.2: the title sentence
+    # belongs in the Word document caption block, not inside the exported
+    # figure. Axis titles remain in-figure per section 11.1.
     fig.update_layout(
-        title=dict(
-            text='Volcano Plot: Ketamine vs Control',
-            font=dict(size=18, family='Arial Black')
-        ),
+        font=dict(family=FONT_FAMILY, size=22, color=SG_TEXT),
         xaxis=dict(
-            title=dict(text='log₂(Fold Change)', font=dict(size=14)),
+            title=dict(
+                text='Log<sub>2</sub> fold change',
+                font=dict(family=FONT_FAMILY, size=22, color=SG_TEXT)
+            ),
+            tickfont=dict(family=FONT_FAMILY, size=20, color=SG_TEXT),
             zeroline=True,
-            zerolinecolor='lightgray',
+            zerolinecolor=SG_GRID,
             zerolinewidth=1,
-            gridcolor='rgba(0,0,0,0.1)'
+            gridcolor=SG_GRID,
+            showline=True,
+            linecolor='black',
+            linewidth=2,
+            mirror=True,
+            ticks='outside',
+            tickcolor='black',
+            tickwidth=2,
+            ticklen=6
         ),
         yaxis=dict(
-            title=dict(text='-log₁₀(Adjusted p-value)', font=dict(size=14)),
-            gridcolor='rgba(0,0,0,0.1)'
+            title=dict(
+                text='-Log<sub>10</sub>(adjusted <i>p</i>-value)',
+                font=dict(family=FONT_FAMILY, size=22, color=SG_TEXT)
+            ),
+            tickfont=dict(family=FONT_FAMILY, size=20, color=SG_TEXT),
+            gridcolor=SG_GRID,
+            showline=True,
+            linecolor='black',
+            linewidth=2,
+            mirror=True,
+            ticks='outside',
+            tickcolor='black',
+            tickwidth=2,
+            ticklen=6
         ),
+        # Legend placed inside the plot in the top-left empty quadrant
+        # (negative log2FC, high -log10(p) region is sparsely populated).
+        # x is offset enough to clear the y-axis line and tick labels.
         legend=dict(
-            title=dict(text='Category'),
+            font=dict(family=FONT_FAMILY, size=20, color=SG_TEXT),
             yanchor='top',
-            y=0.99,
+            y=0.98,
             xanchor='left',
-            x=1.02,
-            bgcolor='rgba(255,255,255,0.8)',
-            bordercolor='lightgray',
+            x=0.10,
+            bgcolor='rgba(255,255,255,0.95)',
+            bordercolor='#D0D0D0',
             borderwidth=1
         ),
         plot_bgcolor='white',
-        width=900,
-        height=650,
-        margin=dict(r=200)
+        paper_bgcolor='white',
+        width=1100,
+        height=800,
+        margin=dict(r=80, t=40, b=90, l=120)
     )
     
     # ---------------------------------------------------------------------
@@ -279,12 +349,15 @@ def create_volcano_plot(df, pval_threshold, output_dir, log_path):
     # ---------------------------------------------------------------------
     html_path = os.path.join(output_dir, 'volcano_plot.html')
     pdf_path = os.path.join(output_dir, 'volcano_plot.pdf')
-    
+    png_path = os.path.join(output_dir, 'volcano_plot.png')
+
     fig.write_html(html_path)
     fig.write_image(pdf_path, scale=2)
-    
+    fig.write_image(png_path, scale=2)
+
     log_message(log_path, f'  Saved: {html_path}')
     log_message(log_path, f'  Saved: {pdf_path}')
+    log_message(log_path, f'  Saved: {png_path}')
 
 
 def create_ma_plot(df, pval_threshold, output_dir, log_path):
@@ -416,101 +489,149 @@ def create_ma_plot(df, pval_threshold, output_dir, log_path):
     # ---------------------------------------------------------------------
     html_path = os.path.join(output_dir, 'ma_plot.html')
     pdf_path = os.path.join(output_dir, 'ma_plot.pdf')
-    
+    png_path = os.path.join(output_dir, 'ma_plot.png')
+
     fig.write_html(html_path)
     fig.write_image(pdf_path, scale=2)
-    
+    fig.write_image(png_path, scale=2)
+
     log_message(log_path, f'  Saved: {html_path}')
     log_message(log_path, f'  Saved: {pdf_path}')
+    log_message(log_path, f'  Saved: {png_path}')
 
 
 def create_summary_bar_chart(df, pval_threshold, output_dir, log_path):
     '''
-    Create summary bar chart showing counts of differential proteins.
-    Fixed formatting to prevent label cutoff and overlap.
+    Create summary bar chart showing counts of differentially abundant
+    proteins by category (quantitative up/down + presence/absence).
+
+    Styled per project_notes/figure_and_table_style_guide.Rmd (2026-05-27).
+    Uses local color overrides rather than the module-level COLOR_UP/DOWN/
+    PA_* constants because the other figures in this script have not yet
+    been restyled (per the guide's "aspirational, not retroactive" rule).
+
+    Palette:
+      - Upregulated (quant)   -> #E8735A (style guide sec. 9.1.1: ketamine series)
+      - Downregulated (quant) -> #7FB3D8 (style guide sec. 9.1.1: control series)
+      - Ketamine-specific P/A -> #FF7F0E (style guide sec. 9.1.3: orange)
+      - Control-specific P/A  -> #9467BD (style guide sec. 9.1.3: purple)
+
+    Four distinct colors fully disambiguate the categories on their own, so
+    no pattern fill is needed (style guide sec. 9.2). Per section 11.1-11.2,
+    the figure interior carries only the data and minimum labels; the figure
+    title, abbreviation definitions, p-value threshold, and statistical-
+    method statement live in the Word document caption block (ordering per
+    section 11.4).
+
+    Type sizes follow the manuscript defaults from style guide section 3
+    (as updated 2026-05-27): axis title 14 pt, tick labels 12 pt, data
+    labels 10 pt. Figure exported at 650 x 400 px, scale = 2. For a slide-
+    deck rendering, scale every size by ~1.25x to the slide-variant column
+    of the section 3 table (17 / 15 / 12 pt) and bump the bar outline
+    weight proportionally.
     '''
     log_message(log_path, 'Creating summary bar chart...')
-    
+
+    # ---------------------------------------------------------------------
+    # Local style constants (figure_and_table_style_guide.Rmd, 2026-05-27)
+    # ---------------------------------------------------------------------
+    SG_UP = '#E8735A'         # up-in-ketamine (coral, sec. 9.1.1)
+    SG_DOWN = '#7FB3D8'       # down-in-ketamine (light blue, sec. 9.1.1)
+    SG_PA_KET = '#FF7F0E'     # ketamine-specific P/A (orange, sec. 9.1.3)
+    SG_PA_CTRL = '#9467BD'    # control-specific P/A (purple, sec. 9.1.3)
+    SG_TEXT = '#000000'       # all figure-interior text (black, sec. 9.1.4)
+    SG_OUTLINE = '#2C3E50'    # bar / marker outlines (dark slate, sec. 9.1.4)
+    SG_GRID = '#E0E0E0'       # faint reference grid lines (sec. 9.1.4)
+    FONT_FAMILY = 'Arial'
+
     # ---------------------------------------------------------------------
     # Calculate counts
     # ---------------------------------------------------------------------
     quant_df = df[df[CATEGORY_COL] == 'quantitative']
     sig_up = len(quant_df[(quant_df['significant']) & (quant_df[DIRECTION_COL] == 'up_in_ketamine')])
     sig_down = len(quant_df[(quant_df['significant']) & (quant_df[DIRECTION_COL] == 'down_in_ketamine')])
-    
+
     ket_specific = len(df[df[CATEGORY_COL] == 'presence_absence_ketamine_specific'])
     ctrl_specific = len(df[df[CATEGORY_COL] == 'presence_absence_control_specific'])
-    
+
     # ---------------------------------------------------------------------
-    # Create figure
+    # Build figure
+    # Sentence-case category labels per style guide sec. 5.
     # ---------------------------------------------------------------------
     categories = [
-        'Upregulated<br>(Quantitative)',
-        'Downregulated<br>(Quantitative)',
+        'Upregulated<br>(quantitative)',
+        'Downregulated<br>(quantitative)',
         'Ketamine-<br>specific',
-        'Control-<br>specific'
+        'Control-<br>specific',
     ]
     counts = [sig_up, sig_down, ket_specific, ctrl_specific]
-    colors = [COLOR_UP, COLOR_DOWN, COLOR_PA_KET, COLOR_PA_CTRL]
-    
+    colors = [SG_UP, SG_DOWN, SG_PA_KET, SG_PA_CTRL]
+
     fig = go.Figure()
-    
+
     fig.add_trace(go.Bar(
         x=categories,
         y=counts,
-        marker_color=colors,
+        marker=dict(
+            color=colors,
+            line=dict(width=0.6, color=SG_OUTLINE)
+        ),
         text=counts,
         textposition='outside',
-        textfont=dict(size=14, color='black')
+        textfont=dict(family=FONT_FAMILY, size=10, color=SG_TEXT),
+        cliponaxis=False
     ))
-    
+
     # ---------------------------------------------------------------------
-    # Layout - fixed margins and y-axis range
+    # Layout (no in-figure title; per sec. 11.2, figure number and title
+    # sentence live in the Word document caption block, not the raster).
+    # Type sizes per style guide section 3 (manuscript defaults, updated
+    # 2026-05-27).
     # ---------------------------------------------------------------------
-    max_count = max(counts)
-    
+    max_count = max(counts) if counts else 1
+
     fig.update_layout(
-        title=dict(
-            text=f'Summary of Differential Proteins (p ≤ {pval_threshold})',
-            font=dict(size=16, family='Arial Black'),
-            y=0.95
-        ),
+        font=dict(family=FONT_FAMILY, size=14, color=SG_TEXT),
         xaxis=dict(
-            title=dict(text='', font=dict(size=12)),
-            tickfont=dict(size=11)
+            tickfont=dict(family=FONT_FAMILY, size=12, color=SG_TEXT),
+            showgrid=False,
+            showline=True,
+            linecolor=SG_TEXT,
+            linewidth=1,
+            mirror=True  # draw opposing border at the top
         ),
         yaxis=dict(
-            title=dict(text='Number of Proteins', font=dict(size=14)),
-            gridcolor='rgba(0,0,0,0.1)',
-            range=[0, max_count * 1.2]  # Add 20% headroom for labels
+            title=dict(
+                text='Number of proteins',
+                font=dict(family=FONT_FAMILY, size=14, color=SG_TEXT)
+            ),
+            tickfont=dict(family=FONT_FAMILY, size=12, color=SG_TEXT),
+            gridcolor=SG_GRID,
+            range=[0, max_count * 1.2],  # headroom for outside data labels
+            showline=True,
+            linecolor=SG_TEXT,
+            linewidth=1,
+            mirror=True  # draw opposing border on the right
         ),
         plot_bgcolor='white',
+        paper_bgcolor='white',
         width=650,
-        height=550,
+        height=400,
         showlegend=False,
         bargap=0.3,
-        margin=dict(t=80, b=120, l=60, r=40)  # Increased margins
+        margin=dict(t=30, b=90, l=80, r=40)
     )
-    
+
     # ---------------------------------------------------------------------
-    # Add footnote with proper positioning
-    # ---------------------------------------------------------------------
-    fig.add_annotation(
-        text=f'Quantitative: adj. p ≤ {pval_threshold}<br>Presence/Absence: detected in one condition only',
-        xref='paper', yref='paper',
-        x=0.5, y=-0.22,
-        showarrow=False,
-        font=dict(size=10, color='gray'),
-        align='center'
-    )
-    
-    # ---------------------------------------------------------------------
-    # Save output
+    # Save outputs (scale=2 per style guide sec. 14)
     # ---------------------------------------------------------------------
     pdf_path = os.path.join(output_dir, 'summary_bar_chart.pdf')
+    png_path = os.path.join(output_dir, 'summary_bar_chart.png')
     fig.write_image(pdf_path, scale=2)
-    
+    fig.write_image(png_path, scale=2)
+
     log_message(log_path, f'  Saved: {pdf_path}')
+    log_message(log_path, f'  Saved: {png_path}')
 
 
 def create_top_proteins_bar_chart(df, output_dir, log_path, n_proteins=10):
@@ -573,12 +694,15 @@ def create_top_proteins_bar_chart(df, output_dir, log_path, n_proteins=10):
     # ---------------------------------------------------------------------
     html_path = os.path.join(output_dir, 'top_proteins_bar_chart.html')
     pdf_path = os.path.join(output_dir, 'top_proteins_bar_chart.pdf')
-    
+    png_path = os.path.join(output_dir, 'top_proteins_bar_chart.png')
+
     fig.write_html(html_path)
     fig.write_image(pdf_path, scale=2)
-    
+    fig.write_image(png_path, scale=2)
+
     log_message(log_path, f'  Saved: {html_path}')
     log_message(log_path, f'  Saved: {pdf_path}')
+    log_message(log_path, f'  Saved: {png_path}')
 
 
 def create_top_proteins_table(df, output_dir, log_path, direction, n_proteins=20):
@@ -774,9 +898,323 @@ def create_top_proteins_table(df, output_dir, log_path, direction, n_proteins=20
     )
     
     pdf_path = os.path.join(output_dir, f'{file_prefix}_table.pdf')
+    png_path = os.path.join(output_dir, f'{file_prefix}_table.png')
     fig.write_image(pdf_path, scale=2)
-    
+    fig.write_image(png_path, scale=2)
+
     log_message(log_path, f'  Saved: {pdf_path}')
+    log_message(log_path, f'  Saved: {png_path}')
+
+
+# =============================================================================
+# VARIABILITY vs FOLD CHANGE vs P-VALUE RELATIONSHIP PLOT
+# =============================================================================
+
+def create_variability_fc_pvalue_plot(df, pval_threshold, output_dir, log_path):
+    '''
+    Create scatter plot showing the three-way relationship between fold change,
+    variability %, and p-value for quantitative proteins.
+
+    Purpose:
+      1. Validate that Proteome Discoverer statistics behave as expected
+         (high-variability proteins should need larger FC for significance)
+      2. Communicate n=3 statistical behavior to thesis committee
+
+    Layout:
+      - Central scatter: log2(FC) on X-axis, Variability % on Y-axis
+      - Points colored by -log10(p-value) with continuous color scale
+      - Significant proteins outlined with black border
+      - Key proteins of interest labeled
+      - Marginal histograms on top and right edges
+
+    Red flags checked:
+      - High variability (>60%) + low p-value (<0.01) at modest |FC| (<1)
+    '''
+    log_message(log_path, 'Creating variability vs FC vs p-value relationship plot...')
+
+    # -----------------------------------------------------------------
+    # Step 1: Filter to quantitative proteins with valid variability
+    # -----------------------------------------------------------------
+    quant_df = df[df[CATEGORY_COL] == 'quantitative'].copy()
+    quant_df = quant_df[quant_df[VARIABILITY_COL].notna()].copy()
+
+    log_message(log_path, f'  Quantitative proteins with variability data: {len(quant_df)}')
+
+    # -----------------------------------------------------------------
+    # Step 2: Compute derived columns
+    # -----------------------------------------------------------------
+    quant_df['abs_log2fc'] = quant_df[LOG2FC_COL].abs()
+    quant_df['neg_log10_pval'] = -np.log10(quant_df[PVAL_COL].replace(0, 1e-20))
+
+    # -----------------------------------------------------------------
+    # Step 3: Red flag check - high variability + low p at modest FC
+    # -----------------------------------------------------------------
+    red_flag_mask = (
+        (quant_df[VARIABILITY_COL] > 60) &
+        (quant_df[PVAL_COL] < 0.01) &
+        (quant_df['abs_log2fc'] < 1)
+    )
+    n_red_flags = red_flag_mask.sum()
+
+    if n_red_flags > 0:
+        log_message(log_path, f'  *** RED FLAG: {n_red_flags} protein(s) with '
+                    f'variability >60%, p<0.01, and |log2FC|<1 ***')
+        flagged = quant_df[red_flag_mask][[GENE_COL, LOG2FC_COL, VARIABILITY_COL, PVAL_COL]]
+        for _, row in flagged.iterrows():
+            log_message(log_path,
+                        f'    {row[GENE_COL]}: log2FC={row[LOG2FC_COL]:.3f}, '
+                        f'var={row[VARIABILITY_COL]:.1f}%, '
+                        f'p={row[PVAL_COL]:.2e}')
+    else:
+        log_message(log_path, '  Red flag check PASSED: no high-variability + '
+                    'low-p + modest-FC proteins found')
+
+    # -----------------------------------------------------------------
+    # Step 4: Create figure with marginal histograms
+    # -----------------------------------------------------------------
+    fig = make_subplots(
+        rows=2, cols=2,
+        column_widths=[0.82, 0.18],
+        row_heights=[0.18, 0.82],
+        shared_xaxes=True,
+        shared_yaxes=True,
+        horizontal_spacing=0.02,
+        vertical_spacing=0.02
+    )
+
+    # -----------------------------------------------------------------
+    # Step 5: Main scatter plot (row=2, col=1)
+    # -----------------------------------------------------------------
+    # Split into significant and non-significant for distinct marker styles
+    sig_mask = quant_df['significant']
+    ns_df = quant_df[~sig_mask]
+    sig_df = quant_df[sig_mask]
+
+    # 5a. Non-significant proteins (no border)
+    fig.add_trace(go.Scatter(
+        x=ns_df[LOG2FC_COL],
+        y=ns_df[VARIABILITY_COL],
+        mode='markers',
+        marker=dict(
+            color=ns_df['neg_log10_pval'],
+            colorscale='Viridis',
+            size=7,
+            opacity=0.6,
+            cmin=0,
+            cmax=quant_df['neg_log10_pval'].quantile(0.95),
+            line=dict(width=0),
+            showscale=False
+        ),
+        name=f'Not significant (n={len(ns_df)})',
+        text=ns_df.apply(
+            lambda r: f"Gene: {r[GENE_COL]}<br>"
+                      f"log2FC: {r[LOG2FC_COL]:.3f}<br>"
+                      f"Variability: {r[VARIABILITY_COL]:.1f}%<br>"
+                      f"p-value: {r[PVAL_COL]:.2e}<br>"
+                      f"-log10(p): {r['neg_log10_pval']:.2f}",
+            axis=1
+        ),
+        hoverinfo='text',
+        showlegend=True
+    ), row=2, col=1)
+
+    # 5b. Significant proteins (black border)
+    fig.add_trace(go.Scatter(
+        x=sig_df[LOG2FC_COL],
+        y=sig_df[VARIABILITY_COL],
+        mode='markers',
+        marker=dict(
+            color=sig_df['neg_log10_pval'],
+            colorscale='Viridis',
+            size=9,
+            opacity=0.9,
+            cmin=0,
+            cmax=quant_df['neg_log10_pval'].quantile(0.95),
+            line=dict(width=1.5, color='black'),
+            colorbar=dict(
+                title=dict(text='-log₁₀(p)', font=dict(size=12)),
+                x=1.02,
+                len=0.6,
+                y=0.35,
+                thickness=15
+            )
+        ),
+        name=f'Significant, p ≤ {pval_threshold} (n={len(sig_df)})',
+        text=sig_df.apply(
+            lambda r: f"Gene: {r[GENE_COL]}<br>"
+                      f"log2FC: {r[LOG2FC_COL]:.3f}<br>"
+                      f"Variability: {r[VARIABILITY_COL]:.1f}%<br>"
+                      f"p-value: {r[PVAL_COL]:.2e}<br>"
+                      f"-log10(p): {r['neg_log10_pval']:.2f}",
+            axis=1
+        ),
+        hoverinfo='text',
+        showlegend=True
+    ), row=2, col=1)
+
+    # -----------------------------------------------------------------
+    # Step 6: Label key proteins of interest
+    # -----------------------------------------------------------------
+    # Tier 1 SNARE/vesicle + contamination examples
+    label_genes = ['Snap25', 'Syt1', 'Stx1a', 'Stxbp1', 'Vamp2',
+                   'Ina', 'Plp1', 'Sv2a']
+
+    labeled = quant_df[quant_df[GENE_COL].isin(label_genes)]
+
+    for _, row in labeled.iterrows():
+        fig.add_annotation(
+            x=row[LOG2FC_COL],
+            y=row[VARIABILITY_COL],
+            text=row[GENE_COL],
+            showarrow=True,
+            arrowhead=0,
+            arrowsize=0.5,
+            arrowwidth=1,
+            ax=25,
+            ay=-18,
+            font=dict(size=9, color='black'),
+            bgcolor='rgba(255,255,255,0.8)',
+            borderpad=2,
+            xref='x',
+            yref='y',
+            row=2, col=1
+        )
+
+    # -----------------------------------------------------------------
+    # Step 7: Marginal histogram - top (log2FC distribution)
+    # -----------------------------------------------------------------
+    fig.add_trace(go.Histogram(
+        x=quant_df[LOG2FC_COL],
+        nbinsx=50,
+        marker_color='rgba(100, 100, 100, 0.5)',
+        showlegend=False,
+        hoverinfo='skip'
+    ), row=1, col=1)
+
+    # -----------------------------------------------------------------
+    # Step 8: Marginal histogram - right (variability distribution)
+    # -----------------------------------------------------------------
+    fig.add_trace(go.Histogram(
+        y=quant_df[VARIABILITY_COL],
+        nbinsy=40,
+        marker_color='rgba(100, 100, 100, 0.5)',
+        showlegend=False,
+        hoverinfo='skip'
+    ), row=2, col=2)
+
+    # -----------------------------------------------------------------
+    # Step 9: Layout and styling
+    # -----------------------------------------------------------------
+    fig.update_layout(
+        title=dict(
+            text='Fold Change vs. Variability vs. Statistical Significance',
+            font=dict(size=16, family='Arial Black'),
+            x=0.4,
+            y=0.98
+        ),
+        plot_bgcolor='white',
+        width=950,
+        height=750,
+        margin=dict(t=60, b=80, l=70, r=120),
+        legend=dict(
+            yanchor='top',
+            y=0.99,
+            xanchor='left',
+            x=0.01,
+            bgcolor='rgba(255,255,255,0.9)',
+            bordercolor='lightgray',
+            borderwidth=1,
+            font=dict(size=10)
+        )
+    )
+
+    # Main scatter axes
+    fig.update_xaxes(
+        title_text='log₂(Fold Change)',
+        title_font=dict(size=13),
+        gridcolor='rgba(0,0,0,0.08)',
+        zeroline=True,
+        zerolinecolor='rgba(0,0,0,0.2)',
+        zerolinewidth=1,
+        row=2, col=1
+    )
+    fig.update_yaxes(
+        title_text='Variability [%]',
+        title_font=dict(size=13),
+        gridcolor='rgba(0,0,0,0.08)',
+        row=2, col=1
+    )
+
+    # Hide marginal axes ticks/labels
+    fig.update_xaxes(showticklabels=False, row=1, col=1)
+    fig.update_yaxes(showticklabels=False, row=1, col=1)
+    fig.update_xaxes(showticklabels=False, row=2, col=2)
+    fig.update_yaxes(showticklabels=False, row=2, col=2)
+
+    # White background for marginal panels
+    fig.update_xaxes(gridcolor='rgba(0,0,0,0)', row=1, col=1)
+    fig.update_yaxes(gridcolor='rgba(0,0,0,0)', row=1, col=1)
+    fig.update_xaxes(gridcolor='rgba(0,0,0,0)', row=2, col=2)
+    fig.update_yaxes(gridcolor='rgba(0,0,0,0)', row=2, col=2)
+
+    # Hide empty subplot (top-right corner)
+    fig.update_xaxes(visible=False, row=1, col=2)
+    fig.update_yaxes(visible=False, row=1, col=2)
+
+    # -----------------------------------------------------------------
+    # Step 10: Add annotation with interpretation guidance
+    # -----------------------------------------------------------------
+    fig.add_annotation(
+        text=('Color = -log₁₀(p-value). Black-bordered points = significant (p ≤ 0.05).<br>'
+              'Quantitative proteins only (n=' + str(len(quant_df)) + '). '
+              'Presence/absence proteins excluded (no variability data).'),
+        xref='paper', yref='paper',
+        x=0.4, y=-0.08,
+        showarrow=False,
+        font=dict(size=10, color='gray'),
+        align='center'
+    )
+
+    # -----------------------------------------------------------------
+    # Step 11: Compute and log summary statistics for QC
+    # -----------------------------------------------------------------
+    # Correlation between |FC| and -log10(p)
+    corr_fc_p = np.corrcoef(quant_df['abs_log2fc'], quant_df['neg_log10_pval'])[0, 1]
+    # Correlation between variability and -log10(p)
+    corr_var_p = np.corrcoef(quant_df[VARIABILITY_COL], quant_df['neg_log10_pval'])[0, 1]
+    # Correlation between variability and |FC|
+    corr_var_fc = np.corrcoef(quant_df[VARIABILITY_COL], quant_df['abs_log2fc'])[0, 1]
+
+    log_message(log_path, f'  Correlations (quantitative proteins, n={len(quant_df)}):')
+    log_message(log_path, f'    |log2FC| vs -log10(p): r = {corr_fc_p:.3f}')
+    log_message(log_path, f'    Variability vs -log10(p): r = {corr_var_p:.3f}')
+    log_message(log_path, f'    Variability vs |log2FC|:  r = {corr_var_fc:.3f}')
+
+    # Variability ranges among significant proteins
+    if len(sig_df) > 0:
+        log_message(log_path, f'  Significant proteins variability range: '
+                    f'{sig_df[VARIABILITY_COL].min():.1f}% - '
+                    f'{sig_df[VARIABILITY_COL].max():.1f}% '
+                    f'(median: {sig_df[VARIABILITY_COL].median():.1f}%)')
+        log_message(log_path, f'  Non-significant proteins variability range: '
+                    f'{ns_df[VARIABILITY_COL].min():.1f}% - '
+                    f'{ns_df[VARIABILITY_COL].max():.1f}% '
+                    f'(median: {ns_df[VARIABILITY_COL].median():.1f}%)')
+
+    # -----------------------------------------------------------------
+    # Step 12: Save outputs
+    # -----------------------------------------------------------------
+    html_path = os.path.join(output_dir, 'variability_fc_pvalue_relationship.html')
+    pdf_path = os.path.join(output_dir, 'variability_fc_pvalue_relationship.pdf')
+    png_path = os.path.join(output_dir, 'variability_fc_pvalue_relationship.png')
+
+    fig.write_html(html_path)
+    fig.write_image(pdf_path, scale=2)
+    fig.write_image(png_path, scale=2)
+
+    log_message(log_path, f'  Saved: {html_path}')
+    log_message(log_path, f'  Saved: {pdf_path}')
+    log_message(log_path, f'  Saved: {png_path}')
 
 
 # =============================================================================
@@ -849,7 +1287,8 @@ def main():
     create_top_proteins_bar_chart(df, args.output_dir, log_path, n_proteins=10)
     create_top_proteins_table(df, args.output_dir, log_path, direction='up', n_proteins=20)
     create_top_proteins_table(df, args.output_dir, log_path, direction='down', n_proteins=20)
-    
+    create_variability_fc_pvalue_plot(df, args.pval_threshold, args.output_dir, log_path)
+
     # ---------------------------------------------------------------------
     # Finalize
     # ---------------------------------------------------------------------
